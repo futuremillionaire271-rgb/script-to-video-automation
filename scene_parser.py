@@ -118,6 +118,53 @@ def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATIO
     return scene_objects
 
 
+def split_into_scenes_aligned(script: str, sentence_times: List[Tuple[float, float]],
+                              target_duration: float = TARGET_SCENE_DURATION) -> List[Scene]:
+    """
+    Split script into scenes using REAL sentence timings from voiceover
+    alignment (see align.py), instead of word-count estimates. Grouping
+    logic matches split_into_scenes: sentences bucket together until the
+    target duration is exceeded, never splitting a sentence.
+    """
+    sentences = sent_tokenize(script.strip())
+    if not sentences:
+        return []
+    if len(sentences) != len(sentence_times):
+        raise ValueError(
+            f"{len(sentences)} sentences but {len(sentence_times)} time spans"
+        )
+
+    scenes: List[Scene] = []
+    bucket: List[str] = []
+    bucket_start = 0.0
+    bucket_end = 0.0
+
+    for sent, (s_start, s_end) in zip(sentences, sentence_times):
+        if not bucket:
+            bucket = [sent]
+            bucket_start, bucket_end = s_start, s_end
+            continue
+        if (s_end - bucket_start) > target_duration:
+            text = ' '.join(bucket)
+            scenes.append(Scene(text, bucket_start, bucket_end, extract_keywords(text)))
+            bucket = [sent]
+            bucket_start, bucket_end = s_start, s_end
+        else:
+            bucket.append(sent)
+            bucket_end = s_end
+
+    if bucket:
+        text = ' '.join(bucket)
+        scenes.append(Scene(text, bucket_start, bucket_end, extract_keywords(text)))
+
+    # Scenes must tile the timeline exactly (clips are cut to duration and
+    # concatenated): each scene ends where the next begins.
+    for i in range(len(scenes) - 1):
+        scenes[i].end_time = scenes[i + 1].start_time
+        scenes[i].duration = scenes[i].end_time - scenes[i].start_time
+    return scenes
+
+
 def extract_keywords(text: str) -> List[str]:
     """
     Extract 2-3 visual keywords from scene text.

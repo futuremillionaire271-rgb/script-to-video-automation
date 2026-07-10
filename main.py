@@ -54,19 +54,6 @@ def _format_eta(seconds: float) -> str:
     return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
-def _voiceover_pace(voiceover: Path, script: str) -> float:
-    """Words/second calibrated from the actual narration audio length."""
-    from moviepy import AudioFileClip
-    audio = AudioFileClip(str(voiceover))
-    vo_duration = audio.duration
-    audio.close()
-    word_count = len(script.split())
-    pace = word_count / vo_duration
-    print(f"Voiceover: {vo_duration:.1f}s for {word_count} words "
-          f"-> pacing calibrated to {pace:.2f} words/sec")
-    return pace
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Convert a text script into an edited documentary-style video.'
@@ -141,16 +128,26 @@ def _run_pipeline(args, script_path: Path):
     print(f"Loading script: {script_path}")
     script = load_script(str(script_path))
 
-    if args.wps is not None:
-        pace = args.wps
-    elif args.voiceover is not None:
-        pace = _voiceover_pace(args.voiceover, script)
+    if args.voiceover is not None:
+        # Align scene boundaries to the narrator's actual pauses — this is
+        # what keeps captions locked to the voice over long videos.
+        from align import align_sentences
+        from nltk.tokenize import sent_tokenize
+        from scene_parser import split_into_scenes_aligned
+        sentences = sent_tokenize(script.strip())
+        print(f"Aligning {len(sentences)} sentences to the voiceover's pause structure...")
+        times = align_sentences([len(s.split()) for s in sentences],
+                                str(args.voiceover))
+        pace = sum(len(s.split()) for s in sentences) / max(times[-1][1], 1e-6)
+        print(f"  voiceover: {times[-1][1]:.1f}s | pace {pace:.2f} words/sec | "
+              f"boundaries snapped to detected pauses")
+        scenes = split_into_scenes_aligned(script, times,
+                                           target_duration=args.scene_duration)
     else:
-        pace = 2.5
-
-    print("Splitting into scenes and extracting keywords...")
-    scenes = split_into_scenes(script, target_duration=args.scene_duration,
-                               words_per_second=pace)
+        pace = args.wps if args.wps is not None else 2.5
+        print("Splitting into scenes and extracting keywords...")
+        scenes = split_into_scenes(script, target_duration=args.scene_duration,
+                                   words_per_second=pace)
     print_scenes(scenes, limit=10 if len(scenes) > 40 else None)
 
     # Plan workflow: export keywords for hand-editing, or apply edits
@@ -192,7 +189,7 @@ def _run_pipeline(args, script_path: Path):
     keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
                 f"motion={not args.no_motion}|grade={not args.no_grade}|"
-                f"callout={not args.no_callout}|v3|"
+                f"callout={not args.no_callout}|v4-aligned|"
                 f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)

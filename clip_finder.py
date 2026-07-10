@@ -32,7 +32,7 @@ load_dotenv(override=True)
 
 VIDEO_SIZE = (1920, 1080)
 REQUEST_TIMEOUT = 20
-RESULTS_PER_QUERY = 30  # more results per request = fewer requests + more variety
+RESULTS_PER_QUERY = 50  # more results per request = fewer requests + more variety
 
 # Throttles sized just under the documented provider limits
 _PEXELS_LIMITER = RateLimiter("pexels", 190, 3600)      # limit: 200/hour
@@ -218,6 +218,20 @@ _ANIMAL_WORDS = {"dog", "cat", "pet", "puppy", "kitten", "bird", "animal",
                  "rabbit", "bunny", "fish", "kitten", "kitty", "pony", "donkey",
                  "elephant", "lion", "tiger", "bear", "wolf", "turtle", "frog"}
 _DESC_SPLIT = re.compile(r"[^a-z]+")
+_FILLER = {"the", "and", "with", "from", "for", "into", "his", "her", "their",
+           "who", "that", "this", "then", "them", "out", "off", "over"}
+
+
+def _relevance_floor(query: str) -> float:
+    """
+    Minimum relevance a candidate must reach to be picked normally.
+    Multi-word queries must share at least one meaningful word with the
+    clip's description; single-word anchors just can't be person/animal
+    mismatched (negative).
+    """
+    content_words = [w for w in query.lower().split()
+                     if len(w) > 2 and w not in _FILLER]
+    return 3.0 if len(content_words) >= 2 else 0.0
 
 
 def _relevance(query: str, desc: str) -> float:
@@ -257,12 +271,17 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCan
       failing — flagged in the log.
     - Raises ClipSearchError if every search attempt errored.
     """
-    queries = [
-        " ".join(scene.keywords),
-        " ".join(scene.keywords[:2]),
-        scene.keywords[0] if scene.keywords else "",
-    ]
-    queries = list(dict.fromkeys(q for q in queries if q))
+    # Keywords containing spaces are treated as full natural-language
+    # queries (from a hand-authored shot list) and tried in order; bare
+    # keyword triples fall back to the old broadening ladder.
+    if any(" " in kw for kw in scene.keywords):
+        queries = list(dict.fromkeys(kw for kw in scene.keywords if kw))
+    else:
+        queries = list(dict.fromkeys(q for q in [
+            " ".join(scene.keywords),
+            " ".join(scene.keywords[:2]),
+            scene.keywords[0] if scene.keywords else "",
+        ] if q))
     if not queries:
         return None
 
@@ -271,6 +290,7 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCan
     errors: list[str] = []
     attempts = 0
     best_used, best_used_score = None, float("-inf")
+    best_weak, best_weak_score = None, float("-inf")
 
     for provider in providers:
         for query in queries:
@@ -281,18 +301,26 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCan
                 errors.append(f"{provider}('{query}'): {exc}")
                 continue
 
+            floor = _relevance_floor(query)
             best_new, best_new_score = None, float("-inf")
             for r in results:
+                rel = _relevance(query, r.get("desc", ""))
                 score = (_score(r["width"], r["height"], r["duration"], scene.duration)
-                         + _relevance(query, r.get("desc", "")))
+                         + rel)
                 candidate = ClipCandidate(
                     source=r["source"], video_id=r["id"], download_url=r["url"],
                     width=r["width"], height=r["height"], duration=r["duration"],
                     query=query,
                 )
                 if candidate.key in used_ids:
-                    if score > best_used_score:
+                    if rel >= floor and score > best_used_score:
                         best_used, best_used_score = candidate, score
+                elif rel < floor:
+                    # HARD FLOOR: description shares nothing with the query
+                    # (or is a person/animal mismatch). Keep only as a very
+                    # last resort, never as a normal pick.
+                    if score > best_weak_score:
+                        best_weak, best_weak_score = candidate, score
                 elif score > best_new_score:
                     best_new, best_new_score = candidate, score
 
@@ -304,6 +332,11 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCan
         print(f"  Scene {index + 1}: all candidates already used — reusing "
               f"{best_used.key} for '{best_used.query}'")
         return best_used
+    if best_weak is not None:
+        print(f"  Scene {index + 1}: WARNING — only low-relevance results for "
+              f"{queries}; using {best_weak.key} (consider editing this shot)")
+        used_ids.add(best_weak.key)
+        return best_weak
 
     if errors and len(errors) == attempts:
         # Every single attempt errored — this is an API/network failure,

@@ -34,11 +34,24 @@ MAX_LINES = 2
 MAX_WORDS_PER_CHUNK = 7   # keeps highlight drift small within a chunk
 
 
+_KW_FILLER = {"the", "and", "with", "from", "for", "into", "over", "out",
+              "his", "her", "their", "a", "an", "of", "at", "in", "on", "to",
+              "up", "by", "or", "man", "woman", "person", "people", "close",
+              "view", "aerial", "home", "table", "background", "simple"}
+
+
 def _keyword_set(keywords) -> set[str]:
+    """
+    Words to render gold in captions. Keywords may be phrase queries
+    ('man drinking glass of water at night') — only their substantive
+    words should glow, not fillers or generic staging words.
+    """
     words = set()
     for kw in keywords:
         for w in kw.lower().split():
-            words.add(re.sub(r"[^\w'-]", "", w))
+            w = re.sub(r"[^\w'-]", "", w)
+            if len(w) >= 4 and w not in _KW_FILLER:
+                words.add(w)
     return words
 
 
