@@ -14,6 +14,7 @@ Requires PEXELS_API_KEY and PIXABAY_API_KEY in .env.
 """
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -138,6 +139,9 @@ def _pexels_request(query: str) -> list[dict]:
             "width": file["width"],
             "height": file["height"],
             "duration": float(video.get("duration", 0)),
+            # Pexels page URL carries a descriptive slug, e.g.
+            # ".../video/a-woman-drinking-water-12345/" -> relevance signal
+            "desc": video.get("url", ""),
         })
     return results
 
@@ -184,22 +188,57 @@ def _pixabay_request(query: str) -> list[dict]:
             "width": width,
             "height": height,
             "duration": float(hit.get("duration", 0)),
+            # Pixabay provides comma-separated tags -> relevance signal
+            "desc": hit.get("tags", ""),
         })
     return results
 
 
 def _score(width: int, height: int, duration: float, needed: float) -> float:
-    """Rank a candidate: long enough > HD > close to target resolution."""
+    """Rank a candidate on technical quality: long enough > HD > near-1080p."""
     score = 0.0
     if duration >= needed:
-        score += 10.0
+        score += 6.0
     else:
-        score -= 5.0 * (needed - duration)  # penalize clips that must loop
+        score -= 4.0 * (needed - duration)  # penalize clips that must loop
     if width >= 1920:
-        score += 3.0
+        score += 2.0
     elif width >= 1280:
-        score += 1.5
+        score += 1.0
     score -= abs(width - VIDEO_SIZE[0]) / 1920.0  # prefer near-1080p files
+    return score
+
+
+_PERSON_WORDS = {"man", "woman", "person", "people", "adult", "senior",
+                 "guy", "lady", "male", "female", "human", "patient"}
+_ANIMAL_WORDS = {"dog", "cat", "pet", "puppy", "kitten", "bird", "animal",
+                 "wildlife", "horse", "cow", "duck", "deer", "insect", "bee",
+                 "wasp", "hornet", "squirrel", "fox", "monkey"}
+_DESC_SPLIT = re.compile(r"[^a-z]+")
+
+
+def _relevance(query: str, desc: str) -> float:
+    """
+    How well a candidate's description (Pexels URL slug / Pixabay tags)
+    matches the search query. This is the difference between "man drinking
+    water" returning a person vs. a dog at a bowl.
+    """
+    if not desc:
+        return 0.0
+    q_words = {w for w in query.lower().split() if len(w) > 2}
+    d_words = {w for w in _DESC_SPLIT.split(desc.lower()) if len(w) > 2}
+    if not q_words or not d_words:
+        return 0.0
+
+    overlap = q_words & d_words
+    score = 3.0 * len(overlap)
+
+    # If we asked for a person but the clip is clearly an animal (and not
+    # also a person), demote it hard.
+    if (q_words & _PERSON_WORDS) and (d_words & _ANIMAL_WORDS) \
+            and not (d_words & _PERSON_WORDS):
+        score -= 8.0
+
     return score
 
 
@@ -241,7 +280,8 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCan
 
             best_new, best_new_score = None, float("-inf")
             for r in results:
-                score = _score(r["width"], r["height"], r["duration"], scene.duration)
+                score = (_score(r["width"], r["height"], r["duration"], scene.duration)
+                         + _relevance(query, r.get("desc", "")))
                 candidate = ClipCandidate(
                     source=r["source"], video_id=r["id"], download_url=r["url"],
                     width=r["width"], height=r["height"], duration=r["duration"],
