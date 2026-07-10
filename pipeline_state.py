@@ -45,11 +45,15 @@ class PipelineLock:
         return False
 
 
-def fingerprint(script_text: str, scene_count: int, scene_duration: float) -> str:
-    """Identity of a run: same script + same splitting settings."""
+def fingerprint(script_text: str, scene_count: int, settings: str) -> str:
+    """
+    Identity of a run: same script + same render settings. Any change to
+    the settings string invalidates old checkpoints (scenes rendered with
+    different motion/transition/pacing settings must not be mixed).
+    """
     h = hashlib.sha256()
     h.update(script_text.encode("utf-8"))
-    h.update(f"|{scene_count}|{scene_duration}".encode())
+    h.update(f"|{scene_count}|{settings}".encode())
     return h.hexdigest()[:16]
 
 

@@ -287,16 +287,22 @@ def download_clip(candidate: ClipCandidate, dest: Path) -> Path:
     return dest
 
 
-def fetch_scene_clip(scene: Scene, index: int, raw_dir: Path,
-                     used_ids: set[str]) -> tuple[VideoClip, Path]:
+def fetch_scene_clip(scene: Scene, index: int, raw_dir: Path, used_ids: set[str],
+                     duration: float = None, shot: int = 0) -> tuple[VideoClip, Path]:
     """
-    Steps 3-4 for one scene: search, download, trim to scene duration, fit
-    to 1920x1080. Returns (clip, raw_path); the caller renders the scene
-    file and then deletes raw_path so raw downloads never pile up.
+    Steps 3-4 for one shot of a scene: search, download, trim to the shot
+    duration (defaults to the whole scene), fit to 1920x1080. Returns
+    (clip, raw_path); the caller renders the scene file and then deletes
+    raw_path so raw downloads never pile up.
+
+    Scenes longer than the pacing target are built from multiple shots
+    (shot=0,1,...) — each shot gets a different clip for the same keywords,
+    keeping visuals moving without splitting the caption.
 
     Raises ClipSearchError if no stock clip can be sourced — placeholders
     are only ever used in explicit --demo mode, never as a silent fallback.
     """
+    shot_duration = duration if duration is not None else scene.duration
     candidate = find_clip_for_scene(scene, index, used_ids)
     if candidate is None:
         raise ClipSearchError(
@@ -305,16 +311,18 @@ def fetch_scene_clip(scene: Scene, index: int, raw_dir: Path,
             f"usable — try broader keywords)"
         )
 
-    raw_path = raw_dir / f"raw_{index + 1:04d}_{candidate.source}_{candidate.video_id}.mp4"
+    raw_path = raw_dir / (
+        f"raw_{index + 1:04d}_{shot}_{candidate.source}_{candidate.video_id}.mp4"
+    )
     download_clip(candidate, raw_path)
 
     clip = VideoFileClip(str(raw_path)).without_audio()
 
-    # Trim to scene duration; loop if the source is shorter
-    if clip.duration >= scene.duration:
-        clip = clip.subclipped(0, scene.duration)
+    # Trim to the shot duration; loop if the source is shorter
+    if clip.duration >= shot_duration:
+        clip = clip.subclipped(0, shot_duration)
     else:
-        clip = clip.with_effects([vfx.Loop(duration=scene.duration)])
+        clip = clip.with_effects([vfx.Loop(duration=shot_duration)])
 
     return _fit_to_frame(clip), raw_path
 

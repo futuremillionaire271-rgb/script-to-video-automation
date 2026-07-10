@@ -4,13 +4,13 @@ Convert a text script into an edited video automatically with stock footage, cap
 
 ## Pipeline Overview
 
-1. **Scene Splitting**: Break script into ~N-second scenes (default 4s, respecting sentence boundaries)
-2. **Keyword Extraction**: Extract 2-3 visual keywords per scene
-3. **Stock Footage Search**: Find matching clips via Pexels/Pixabay APIs (alternating per scene, rate-limited, results cached 24h)
-4. **Download & Trim**: Download clips, trim to scene duration, delete raw files immediately
-5. **Assemble**: ffmpeg concat demuxer for the final stitch (fast at any scale); short fade or hard-cut transitions baked per scene
-6. **Captions**: Burn scene text as on-screen captions
-7. **Export**: Output final MP4 (1920x1080, H.264)
+1. **Scene Splitting**: Break script into ~N-second scenes (default 4s, sentence-safe); pacing auto-calibrates to a `--voiceover` track
+2. **Keyword Extraction**: Extract 2-3 visual keywords per scene; hand-editable via `--export-plan` / `--use-plan`
+3. **Stock Footage Search**: Pexels/Pixabay APIs (alternating per scene, rate-limited, results cached 24h, no clip reuse while alternatives exist)
+4. **Download & Trim**: Scenes longer than `--max-shot` are built from multiple different clips (sub-shots) so visuals keep moving; raw downloads deleted immediately
+5. **Assemble**: Documentary treatment baked per scene — Ken Burns motion (zoom/pan, varied), planned transition mix (hard cuts, dip-to-black, white flash, punch-ins), light grade + vignette — then ffmpeg concat (stream copy)
+6. **Captions**: Burned in per scene with the scene's key words highlighted in gold
+7. **Export**: 1920x1080 H.264; optional background music ducked under an optional voiceover, muxed without re-encoding video
 
 Built to scale to 30+ minute videos (450+ scenes): API throttling, search caching,
 per-scene disk cleanup, and checkpoint-based resume after interruption.
@@ -72,8 +72,17 @@ Options:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--demo` | off | Placeholder visuals, no API keys/network needed |
-| `--scene-duration N` | 4.0 | Target scene length in seconds (6-8 recommended for 30+ min videos) |
-| `--transition fade\|cut` | fade | 0.2s fade to/from black at scene edges, or hard cuts |
+| `--scene-duration N` | 4.0 | Target scene (caption) length in seconds (6-8 recommended for 30+ min videos) |
+| `--max-shot N` | 4.5 | Longest one clip stays on screen; longer scenes use 2-3 different clips (0 disables) |
+| `--transition varied\|fade\|cut` | varied | Planned per-boundary mix of cuts/dips/flashes/punch-ins, uniform fades, or hard cuts |
+| `--no-motion` | off | Disable Ken Burns motion (faster renders) |
+| `--no-grade` | off | Disable contrast grade + vignette |
+| `--music FILE` | — | Background music: looped, ducked to ~10%, faded in/out |
+| `--voiceover FILE` | — | Narration at full volume; scene pacing auto-syncs to its length |
+| `--wps N` | 2.5 | Speaking pace override (words/second) |
+| `--export-plan FILE` | — | Write scene plan JSON (text/timing/keywords) and exit |
+| `--use-plan FILE` | — | Render with hand-edited keywords from a plan file |
+| `--workers N` | cores-1 (max 3) | Parallel scene render processes |
 | `--progress-every N` | 10 | Progress line every N completed scenes |
 | `--keep-temp` | off | Keep scene clips + checkpoint after export |
 

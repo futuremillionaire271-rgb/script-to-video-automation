@@ -50,10 +50,12 @@ def load_script(filepath: str) -> str:
         return f.read()
 
 
-def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATION) -> List[Scene]:
+def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATION,
+                      words_per_second: float = SPEAKING_PACE) -> List[Scene]:
     """
     Split script into scenes of ~target_duration seconds, respecting
-    sentence boundaries.
+    sentence boundaries. words_per_second calibrates timing to the actual
+    narration pace (auto-derived from a voiceover file when one is given).
 
     Algorithm:
     1. Split into sentences.
@@ -74,18 +76,18 @@ def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATIO
         word_count = len(sentence.split())
 
         # Estimate time this sentence would take to speak
-        sentence_duration = word_count / SPEAKING_PACE
+        sentence_duration = word_count / words_per_second
 
         # If adding this sentence would exceed the target, finalize current bucket
         if (
             current_bucket
-            and current_word_count / SPEAKING_PACE + sentence_duration > target_duration
+            and current_word_count / words_per_second + sentence_duration > target_duration
         ):
             # Finalize the current bucket
             scene_text = ' '.join(current_bucket)
             keywords = extract_keywords(scene_text)
             current_word_count_final = sum(len(s.split()) for s in current_bucket)
-            duration = current_word_count_final / SPEAKING_PACE
+            duration = current_word_count_final / words_per_second
             scenes.append((scene_text, duration, keywords))
 
             # Start a new bucket with this sentence
@@ -101,7 +103,7 @@ def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATIO
         scene_text = ' '.join(current_bucket)
         keywords = extract_keywords(scene_text)
         current_word_count_final = sum(len(s.split()) for s in current_bucket)
-        duration = current_word_count_final / SPEAKING_PACE
+        duration = current_word_count_final / words_per_second
         scenes.append((scene_text, duration, keywords))
 
     # Convert to Scene objects with absolute timing
