@@ -22,7 +22,10 @@ per-scene disk cleanup, and checkpoint-based resume after interruption.
 ├── main.py                    # Entry point / orchestration
 ├── scene_parser.py            # Steps 1-2: Scene splitting & keyword extraction
 ├── clip_finder.py             # Steps 3-4: Stock footage search & download
-├── editor.py                  # Steps 5-7: Assembly, captions, export
+├── scene_builder.py           # Per-scene worker: build + treat + render one scene
+├── effects.py                 # Motion, cinematic grade, vignette, transitions
+├── captions.py                # Animated karaoke captions (word-by-word highlight)
+├── editor.py                  # Assembly (ffmpeg concat), audio mux, export
 ├── api_limits.py              # Rate limiting, monthly budgets, search cache
 ├── pipeline_state.py          # Checkpointing for resumable runs
 ├── test_scenes.py             # Test harness for scene breakdown
@@ -111,8 +114,16 @@ Outputs final video to `output/your_script_<timestamp>.mp4`.
 - **Keywords**: Extracted via NLTK POS tagging; can be improved with semantic analysis later
 - **Temp Files**: Raw downloads are deleted per scene; trimmed scene clips are cleaned up
   after a successful export unless `--keep-temp` is passed
-- **Transitions**: The concat demuxer can't overlap clips, so true crossfades are replaced
-  by short fades baked into each scene's edges (`--transition cut` for hard cuts)
+- **Captions**: Animated karaoke style — bold lower-third text where the spoken word is
+  highlighted with a gold pill and the scene's keywords glow gold. Timing is distributed
+  across the scene (and matches the narration when `--voiceover` is supplied)
+- **Motion**: Every clip gets a strong (~22%) eased Ken Burns move (zoom/pan), varied so no
+  two neighbours match; `--no-motion` disables it
+- **Grade**: Teal-orange cinematic grade (cool shadows, warm highlights, added contrast +
+  saturation) plus a vignette; `--no-grade` disables both
+- **Transitions**: The concat demuxer can't overlap clips, so transitions are baked per
+  scene — hard cuts, punch-ins, zoom-punches, dip-to-black, and white flashes, planned so
+  neighbours differ (`--transition cut` for hard cuts only)
 - **Clip Variety**: Clips aren't reused across scenes while unused candidates remain;
   on very long runs with narrow topics, the best already-used clip is reused (logged)
   rather than failing

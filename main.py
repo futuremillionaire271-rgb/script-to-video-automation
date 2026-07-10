@@ -252,7 +252,9 @@ def _run_pipeline(args, script_path: Path):
             "start": scene.start_time, "end": scene.end_time,
             "shots": shots,
             "in_style": in_style, "out_style": out_style,
-            "motion": motion_plan[i] if (motion_plan is not None and in_style != "punch") else None,
+            "motion": (motion_plan[i]
+                       if (motion_plan is not None and in_style not in ("punch", "zoompunch"))
+                       else None),
             "grade": not args.no_grade,
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),

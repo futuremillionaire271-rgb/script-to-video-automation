@@ -11,8 +11,9 @@ from pathlib import Path
 
 from moviepy import VideoFileClip, concatenate_videoclips, vfx
 
+from captions import burn_captions
 from clip_finder import ClipCandidate, download_clip, _fit_to_frame, make_placeholder_clip
-from editor import add_caption, render_scene_file
+from editor import render_scene_file
 from effects import add_vignette, apply_edges, apply_grade, apply_motion, punch_in
 from scene_parser import Scene
 
@@ -49,8 +50,8 @@ def render_scene_job(job: dict) -> int:
 
     # Documentary treatment: motion -> grade -> caption -> edge transitions
     in_style = job["in_style"]
-    if in_style == "punch":
-        clip = punch_in(clip)
+    if in_style in ("punch", "zoompunch"):
+        clip = punch_in(clip, amount=0.42 if in_style == "zoompunch" else 0.32)
         in_style = "cut"
     elif job["motion"]:
         clip = apply_motion(clip, job["motion"])
@@ -58,7 +59,7 @@ def render_scene_job(job: dict) -> int:
     if job["grade"]:
         clip = add_vignette(apply_grade(clip))
 
-    clip = add_caption(clip, scene.text, scene.keywords)
+    clip = burn_captions(clip, scene.text, scene.keywords)
     clip = apply_edges(clip, in_style, job["out_style"])
 
     render_scene_file(clip, Path(job["scene_file"]))
