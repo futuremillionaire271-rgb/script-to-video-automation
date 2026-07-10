@@ -24,6 +24,7 @@ Progress is checkpointed after every scene; interrupted runs resume.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -183,8 +184,12 @@ def _run_pipeline(args, script_path: Path):
     boundaries = plan_transitions(len(scenes)) if args.transition == 'varied' else None
     motion_plan = None if args.no_motion else plan_motion(len(scenes))
 
+    # Keywords are part of the run identity: editing the shot list must
+    # invalidate old rendered scenes so they re-render with new footage.
+    keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
-                f"motion={not args.no_motion}|grade={not args.no_grade}|v2")
+                f"motion={not args.no_motion}|grade={not args.no_grade}|v2|"
+                f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)
     already_done = sum(
