@@ -9,7 +9,40 @@ scene settings change between runs.
 
 import hashlib
 import json
+import os
 from pathlib import Path
+
+
+class PipelineLock:
+    """
+    Guard against two pipeline runs sharing temp/ at once — the second run
+    would race the first's per-scene files and post-export cleanup.
+    Stale locks (dead PID) are reclaimed automatically.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        if self.path.exists():
+            try:
+                other_pid = int(self.path.read_text().strip())
+                os.kill(other_pid, 0)  # raises if PID is gone
+                raise RuntimeError(
+                    f"Another pipeline run (PID {other_pid}) is already using this "
+                    f"project directory. Wait for it or stop it, then re-run. "
+                    f"(Stale lock? Delete {self.path})"
+                )
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass  # stale or unreadable lock — take it over
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(str(os.getpid()))
+        return self
+
+    def __exit__(self, *exc):
+        if self.path.exists():
+            self.path.unlink(missing_ok=True)
+        return False
 
 
 def fingerprint(script_text: str, scene_count: int, scene_duration: float) -> str:

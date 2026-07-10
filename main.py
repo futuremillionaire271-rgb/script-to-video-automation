@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 
 from scene_parser import load_script, split_into_scenes, print_scenes
-from pipeline_state import Checkpoint, fingerprint
+from pipeline_state import Checkpoint, PipelineLock, fingerprint
 
 TEMP_DIR = Path("temp")
 
@@ -93,6 +93,16 @@ def main():
     if not script_path.exists():
         print(f"Error: Script file not found: {script_path}")
         sys.exit(1)
+
+    try:
+        with PipelineLock(TEMP_DIR / "pipeline.lock"):
+            _run_pipeline(args, script_path)
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+
+def _run_pipeline(args, script_path: Path):
 
     # Steps 1-2: scenes + keywords
     print(f"Loading script: {script_path}")
