@@ -1,0 +1,5 @@
+moviepy>=0.2.3
+requests>=2.25
+python-dotenv>=0.19
+nltk>=3.6
+Pillow>=8.0
