@@ -213,7 +213,10 @@ _PERSON_WORDS = {"man", "woman", "person", "people", "adult", "senior",
                  "guy", "lady", "male", "female", "human", "patient"}
 _ANIMAL_WORDS = {"dog", "cat", "pet", "puppy", "kitten", "bird", "animal",
                  "wildlife", "horse", "cow", "duck", "deer", "insect", "bee",
-                 "wasp", "hornet", "squirrel", "fox", "monkey"}
+                 "wasp", "hornet", "squirrel", "fox", "monkey", "lamb", "sheep",
+                 "goat", "calf", "chicken", "rooster", "hen", "pig", "piglet",
+                 "rabbit", "bunny", "fish", "kitten", "kitty", "pony", "donkey",
+                 "elephant", "lion", "tiger", "bear", "wolf", "turtle", "frog"}
 _DESC_SPLIT = re.compile(r"[^a-z]+")
 
 
