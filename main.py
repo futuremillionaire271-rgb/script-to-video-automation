@@ -18,6 +18,7 @@ visuals per scene, so you can preview scene timing, captions, and transitions.
 """
 
 import argparse
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -70,9 +71,11 @@ def main():
             make_placeholder_clip(scene, i) for i, scene in enumerate(scenes)
         ]
     else:
-        print("Stock footage search (Steps 3-4) is not implemented yet.")
-        print("Run with --demo to preview the pipeline with placeholder visuals.")
-        sys.exit(1)
+        from clip_finder import prepare_scene_clip
+        print("Searching and downloading stock footage (Pexels, Pixabay fallback)...")
+        scene_clips = [
+            prepare_scene_clip(scene, i) for i, scene in enumerate(scenes)
+        ]
 
     # Step 6: burn captions onto each scene clip (per-scene timing is implicit)
     from editor import add_caption, assemble_scenes, export_video
@@ -89,6 +92,14 @@ def main():
     output_path = build_output_path(script_path)
     print(f"Exporting to {output_path} ...")
     export_video(final, str(output_path))
+
+    # Clean up downloaded/trimmed clips unless asked to keep them
+    temp_dir = Path("temp")
+    if not args.keep_temp and temp_dir.exists():
+        shutil.rmtree(temp_dir)
+        print("Cleaned up temp files (use --keep-temp to keep them).")
+    elif args.keep_temp and temp_dir.exists():
+        print(f"Temp files kept in {temp_dir}/")
 
     print(f"\nDone: {output_path}")
 

@@ -69,7 +69,14 @@ Outputs final video to `output/your_script_<timestamp>.mp4`
 
 - ✅ **Step 1**: Scene splitting (respects sentence boundaries, targets ~4s)
 - ✅ **Step 2**: Keyword extraction (nouns + adjectives, rule-based)
-- ⏳ **Steps 3-7**: To be implemented (clip search, download, assembly, captions, export)
+- ✅ **Step 3**: Stock footage search (Pexels primary, Pixabay fallback, broadening queries)
+- ✅ **Step 4**: Download & trim (streamed download, trim/loop to scene duration, fit to 1080p)
+- ✅ **Step 5**: Assembly with 0.4s crossfade transitions
+- ✅ **Step 6**: Captions burned in per scene
+- ✅ **Step 7**: MP4 export (1920x1080, H.264)
+
+Run `python main.py <script.txt>` for the full pipeline (needs API keys in `.env`),
+or `python main.py <script.txt> --demo` for a no-network preview with placeholder visuals.
 
 ## Design Notes
 
