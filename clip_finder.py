@@ -23,11 +23,62 @@ from moviepy import CompositeVideoClip, ImageClip, TextClip, VideoClip, VideoFil
 
 from scene_parser import Scene
 
-load_dotenv()
+# override=True so .env is the source of truth even when the shell already
+# has (possibly stale) PEXELS_API_KEY / PIXABAY_API_KEY values set
+load_dotenv(override=True)
 
 VIDEO_SIZE = (1920, 1080)
 TEMP_DIR = Path("temp")
 REQUEST_TIMEOUT = 20
+
+
+class ClipSearchError(RuntimeError):
+    """Raised when stock footage cannot be sourced — never fail silently."""
+
+
+def check_api_access() -> None:
+    """
+    Preflight before any scene work: verify keys are loaded and at least one
+    stock API is reachable. Raises ClipSearchError with the exact reason.
+    """
+    for name in ("PEXELS_API_KEY", "PIXABAY_API_KEY"):
+        print(f"  {name}: {'present (' + str(len(os.environ[name])) + ' chars)' if os.getenv(name) else 'MISSING'}")
+
+    failures = []
+    try:
+        resp = requests.get(
+            "https://api.pexels.com/videos/search",
+            headers={"Authorization": os.getenv("PEXELS_API_KEY", "")},
+            params={"query": "nature", "per_page": 1},
+            timeout=REQUEST_TIMEOUT,
+        )
+        print(f"  Pexels reachability: HTTP {resp.status_code}")
+        if resp.status_code == 401:
+            failures.append("Pexels: HTTP 401 — API key rejected")
+    except requests.RequestException as exc:
+        failures.append(f"Pexels unreachable: {exc}")
+
+    try:
+        resp = requests.get(
+            "https://pixabay.com/api/videos/",
+            params={"key": os.getenv("PIXABAY_API_KEY", ""), "q": "nature", "per_page": 3},
+            timeout=REQUEST_TIMEOUT,
+        )
+        print(f"  Pixabay reachability: HTTP {resp.status_code}")
+        if resp.status_code in (400, 401, 403) and "key" in resp.text.lower():
+            failures.append(f"Pixabay: HTTP {resp.status_code} — API key rejected")
+    except requests.RequestException as exc:
+        failures.append(f"Pixabay unreachable: {exc}")
+
+    if len(failures) == 2:
+        raise ClipSearchError(
+            "No stock footage API is usable:\n  - " + "\n  - ".join(failures)
+            + "\nIf errors mention 'Tunnel connection failed: 403', this environment's "
+            "network policy is blocking the stock footage domains — allow "
+            "api.pexels.com, *.pexels.com, pixabay.com, cdn.pixabay.com, or run locally."
+        )
+    if failures:
+        print(f"  WARNING: {failures[0]} — continuing with the other source")
 
 
 @dataclass
@@ -160,16 +211,27 @@ def find_clip_for_scene(scene: Scene, used_ids: set[str]) -> ClipCandidate | Non
     # Deduplicate while preserving order, drop empties
     queries = list(dict.fromkeys(q for q in queries if q))
 
+    errors = []
+    attempts = 0
     for search in (search_pexels, search_pixabay):
         for query in queries:
+            attempts += 1
             try:
                 candidate = search(query, scene.duration)
             except requests.RequestException as exc:
-                print(f"  ! {search.__name__}('{query}') failed: {exc}")
+                errors.append(f"{search.__name__}('{query}'): {exc}")
                 continue
             if candidate and f"{candidate.source}:{candidate.video_id}" not in used_ids:
                 used_ids.add(f"{candidate.source}:{candidate.video_id}")
                 return candidate
+
+    if errors and len(errors) == attempts:
+        # Every single attempt errored — this is an API/network failure,
+        # not a "no results" situation. Surface it.
+        raise ClipSearchError(
+            f"All {attempts} search attempts failed for keywords {scene.keywords}:\n  - "
+            + "\n  - ".join(errors)
+        )
     return None
 
 
@@ -193,12 +255,16 @@ def prepare_scene_clip(scene: Scene, index: int, temp_dir: Path = TEMP_DIR) -> V
     Full Steps 3-4 for one scene: search, download, trim to scene duration,
     and fit to 1920x1080 (scale to cover, center-crop).
 
-    Falls back to a placeholder clip if no stock result is found.
+    Raises ClipSearchError if no stock clip can be sourced — placeholders are
+    only ever used in explicit --demo mode, never as a silent fallback.
     """
     candidate = find_clip_for_scene(scene, prepare_scene_clip._used_ids)
     if candidate is None:
-        print(f"  Scene {index + 1}: no stock match for {scene.keywords}, using placeholder")
-        return make_placeholder_clip(scene, index)
+        raise ClipSearchError(
+            f"Scene {index + 1}: no stock results on Pexels or Pixabay for "
+            f"keywords {scene.keywords} (searches succeeded but returned nothing "
+            f"usable — try broader keywords)"
+        )
 
     path = temp_dir / f"scene_{index + 1:02d}_{candidate.source}_{candidate.video_id}.mp4"
     print(f"  Scene {index + 1}: {candidate.source} #{candidate.video_id} "

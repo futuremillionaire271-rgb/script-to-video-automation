@@ -71,7 +71,13 @@ def main():
             make_placeholder_clip(scene, i) for i, scene in enumerate(scenes)
         ]
     else:
-        from clip_finder import prepare_scene_clip
+        from clip_finder import ClipSearchError, check_api_access, prepare_scene_clip
+        print("Preflight: checking API keys and connectivity...")
+        try:
+            check_api_access()
+        except ClipSearchError as exc:
+            print(f"\nFATAL: {exc}")
+            sys.exit(1)
         print("Searching and downloading stock footage (Pexels, Pixabay fallback)...")
         scene_clips = [
             prepare_scene_clip(scene, i) for i, scene in enumerate(scenes)
