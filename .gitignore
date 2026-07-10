@@ -49,5 +49,6 @@ htmlcov/
 
 # Project-specific
 temp/
+cache/
 output/*.mp4
 output/*.log

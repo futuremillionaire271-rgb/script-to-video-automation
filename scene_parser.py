@@ -50,15 +50,16 @@ def load_script(filepath: str) -> str:
         return f.read()
 
 
-def split_into_scenes(script: str) -> List[Scene]:
+def split_into_scenes(script: str, target_duration: float = TARGET_SCENE_DURATION) -> List[Scene]:
     """
-    Split script into ~4-second scenes, respecting sentence boundaries.
+    Split script into scenes of ~target_duration seconds, respecting
+    sentence boundaries.
 
     Algorithm:
     1. Split into sentences.
-    2. Group sentences into "buckets" targeting ~4s each.
-    3. If a sentence alone would exceed 4s, give it its own scene.
-    4. If multiple short sentences fit within 4s, group them.
+    2. Group sentences into "buckets" targeting ~target_duration each.
+    3. If a sentence alone would exceed the target, give it its own scene.
+    4. If multiple short sentences fit within the target, group them.
     5. Extract keywords from each scene's text.
     """
     sentences = sent_tokenize(script.strip())
@@ -78,7 +79,7 @@ def split_into_scenes(script: str) -> List[Scene]:
         # If adding this sentence would exceed the target, finalize current bucket
         if (
             current_bucket
-            and current_word_count / SPEAKING_PACE + sentence_duration > TARGET_SCENE_DURATION
+            and current_word_count / SPEAKING_PACE + sentence_duration > target_duration
         ):
             # Finalize the current bucket
             scene_text = ' '.join(current_bucket)
@@ -154,8 +155,13 @@ def extract_keywords(text: str) -> List[str]:
     return unique_candidates[:3]
 
 
-def print_scenes(scenes: List[Scene]) -> None:
-    """Pretty-print scene breakdown for inspection."""
+def print_scenes(scenes: List[Scene], limit: int = None) -> None:
+    """
+    Pretty-print scene breakdown for inspection.
+
+    With hundreds of scenes, pass `limit` to print only the first N and a
+    summary line for the rest.
+    """
     if not scenes:
         print("No scenes generated.")
         return
@@ -164,15 +170,18 @@ def print_scenes(scenes: List[Scene]) -> None:
     print(f"Scene Breakdown ({len(scenes)} scenes)")
     print(f"{'='*80}\n")
 
-    total_duration = 0.0
-    for i, scene in enumerate(scenes, 1):
+    shown = scenes if limit is None else scenes[:limit]
+    for i, scene in enumerate(shown, 1):
         print(f"Scene {i} | {scene.start_time:06.2f}s → {scene.end_time:06.2f}s "
               f"({scene.duration:5.2f}s)")
         print(f"  Text: {scene.text[:70]}..." if len(scene.text) > 70 else f"  Text: {scene.text}")
         print(f"  Keywords: {', '.join(scene.keywords)}")
         print()
-        total_duration += scene.duration
 
+    if limit is not None and len(scenes) > limit:
+        print(f"... and {len(scenes) - limit} more scenes\n")
+
+    total_duration = sum(s.duration for s in scenes)
     print(f"{'='*80}")
     print(f"Total duration: {total_duration:.2f}s ({total_duration/60:.2f}m)")
     print(f"{'='*80}\n")

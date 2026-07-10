@@ -1,15 +1,16 @@
 """
-Stock footage search, download, and trim.
+Stock footage search, download, and trim — built for 450+ scene runs.
 
-Step 3: Search Pexels (primary) and Pixabay (fallback) for clips matching
-        scene keywords. Prefer landscape, HD, duration >= scene duration.
-Step 4: Download the chosen clip and trim/resize it to the scene's duration
-        at 1920x1080.
+Step 3: Search Pexels and Pixabay for clips matching scene keywords,
+        alternating provider per scene to spread rate-limit load.
+        Results are cached for 24h; requests are throttled to stay inside
+        each provider's limits (Pexels 200/hr + 20k/month, Pixabay 100/60s).
+Step 4: Download the chosen clip, trim/fit to the scene, and delete the raw
+        download immediately so hundreds of raw files never accumulate.
 
 Requires PEXELS_API_KEY and PIXABAY_API_KEY in .env.
 
-`make_placeholder_clip` remains available as the no-network demo fallback
-(used by --demo, and per-scene when no stock result is found).
+`make_placeholder_clip` remains the no-network --demo fallback.
 """
 
 import os
@@ -21,6 +22,7 @@ import requests
 from dotenv import load_dotenv
 from moviepy import CompositeVideoClip, ImageClip, TextClip, VideoClip, VideoFileClip, vfx
 
+from api_limits import MonthlyBudget, RateLimiter, SearchCache
 from scene_parser import Scene
 
 # override=True so .env is the source of truth even when the shell already
@@ -28,57 +30,18 @@ from scene_parser import Scene
 load_dotenv(override=True)
 
 VIDEO_SIZE = (1920, 1080)
-TEMP_DIR = Path("temp")
 REQUEST_TIMEOUT = 20
+RESULTS_PER_QUERY = 30  # more results per request = fewer requests + more variety
+
+# Throttles sized just under the documented provider limits
+_PEXELS_LIMITER = RateLimiter("pexels", 190, 3600)      # limit: 200/hour
+_PIXABAY_LIMITER = RateLimiter("pixabay", 90, 60)       # limit: 100/60s
+_PEXELS_BUDGET = MonthlyBudget("pexels", 19_500)        # limit: 20,000/month
+_CACHE = SearchCache()
 
 
 class ClipSearchError(RuntimeError):
     """Raised when stock footage cannot be sourced — never fail silently."""
-
-
-def check_api_access() -> None:
-    """
-    Preflight before any scene work: verify keys are loaded and at least one
-    stock API is reachable. Raises ClipSearchError with the exact reason.
-    """
-    for name in ("PEXELS_API_KEY", "PIXABAY_API_KEY"):
-        print(f"  {name}: {'present (' + str(len(os.environ[name])) + ' chars)' if os.getenv(name) else 'MISSING'}")
-
-    failures = []
-    try:
-        resp = requests.get(
-            "https://api.pexels.com/videos/search",
-            headers={"Authorization": os.getenv("PEXELS_API_KEY", "")},
-            params={"query": "nature", "per_page": 1},
-            timeout=REQUEST_TIMEOUT,
-        )
-        print(f"  Pexels reachability: HTTP {resp.status_code}")
-        if resp.status_code == 401:
-            failures.append("Pexels: HTTP 401 — API key rejected")
-    except requests.RequestException as exc:
-        failures.append(f"Pexels unreachable: {exc}")
-
-    try:
-        resp = requests.get(
-            "https://pixabay.com/api/videos/",
-            params={"key": os.getenv("PIXABAY_API_KEY", ""), "q": "nature", "per_page": 3},
-            timeout=REQUEST_TIMEOUT,
-        )
-        print(f"  Pixabay reachability: HTTP {resp.status_code}")
-        if resp.status_code in (400, 401, 403) and "key" in resp.text.lower():
-            failures.append(f"Pixabay: HTTP {resp.status_code} — API key rejected")
-    except requests.RequestException as exc:
-        failures.append(f"Pixabay unreachable: {exc}")
-
-    if len(failures) == 2:
-        raise ClipSearchError(
-            "No stock footage API is usable:\n  - " + "\n  - ".join(failures)
-            + "\nIf errors mention 'Tunnel connection failed: 403', this environment's "
-            "network policy is blocking the stock footage domains — allow "
-            "api.pexels.com, *.pexels.com, pixabay.com, cdn.pixabay.com, or run locally."
-        )
-    if failures:
-        print(f"  WARNING: {failures[0]} — continuing with the other source")
 
 
 @dataclass
@@ -92,43 +55,91 @@ class ClipCandidate:
     duration: float      # source video duration in seconds
     query: str
 
+    @property
+    def key(self) -> str:
+        return f"{self.source}:{self.video_id}"
+
 
 # ---------------------------------------------------------------------------
-# Step 3: search
+# Step 3: search (throttled + cached)
 # ---------------------------------------------------------------------------
 
-def search_pexels(query: str, needed_duration: float) -> ClipCandidate | None:
-    """Search Pexels videos; return the best candidate or None."""
+def check_api_access() -> None:
+    """
+    Preflight before any scene work: verify keys are loaded and at least one
+    stock API is reachable. Raises ClipSearchError with the exact reason.
+    (Goes through the same cache/throttle path as real searches, so a warm
+    cache makes this free on resumed runs.)
+    """
+    for name in ("PEXELS_API_KEY", "PIXABAY_API_KEY"):
+        print(f"  {name}: "
+              f"{'present (' + str(len(os.environ[name])) + ' chars)' if os.getenv(name) else 'MISSING'}")
+    print(f"  Pexels monthly usage: {_PEXELS_BUDGET.used()}/{_PEXELS_BUDGET.limit}")
+
+    failures = []
+    for provider in ("pexels", "pixabay"):
+        try:
+            _search(provider, "nature")
+            print(f"  {provider} reachability: OK")
+        except requests.RequestException as exc:
+            failures.append(f"{provider} unreachable: {exc}")
+        except RuntimeError as exc:
+            failures.append(f"{provider}: {exc}")
+
+    if len(failures) == 2:
+        raise ClipSearchError(
+            "No stock footage API is usable:\n  - " + "\n  - ".join(failures)
+            + "\nIf errors mention 'Tunnel connection failed: 403', this environment's "
+            "network policy is blocking the stock footage domains — allow "
+            "api.pexels.com, *.pexels.com, pixabay.com, cdn.pixabay.com, or run locally."
+        )
+    if failures:
+        print(f"  WARNING: {failures[0]} — continuing with the other source")
+
+
+def _search(provider: str, query: str) -> list[dict]:
+    """Cached, throttled search. Returns a list of raw candidate dicts."""
+    cache_key = f"{provider}:{query}"
+    cached = _CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if provider == "pexels":
+        results = _pexels_request(query)
+    else:
+        results = _pixabay_request(query)
+    _CACHE.put(cache_key, results)
+    return results
+
+
+def _pexels_request(query: str) -> list[dict]:
     api_key = os.getenv("PEXELS_API_KEY")
     if not api_key:
-        return None
-
+        return []
+    _PEXELS_LIMITER.wait()
+    _PEXELS_BUDGET.increment()
     resp = requests.get(
         "https://api.pexels.com/videos/search",
         headers={"Authorization": api_key},
-        params={"query": query, "orientation": "landscape", "per_page": 15},
+        params={"query": query, "orientation": "landscape", "per_page": RESULTS_PER_QUERY},
         timeout=REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
 
-    best, best_score = None, float("-inf")
+    results = []
     for video in resp.json().get("videos", []):
         file = _pick_pexels_file(video.get("video_files", []))
         if file is None:
             continue
-        score = _score(file["width"], file["height"], video.get("duration", 0), needed_duration)
-        if score > best_score:
-            best_score = score
-            best = ClipCandidate(
-                source="pexels",
-                video_id=str(video["id"]),
-                download_url=file["link"],
-                width=file["width"],
-                height=file["height"],
-                duration=float(video.get("duration", 0)),
-                query=query,
-            )
-    return best
+        results.append({
+            "source": "pexels",
+            "id": str(video["id"]),
+            "url": file["link"],
+            "width": file["width"],
+            "height": file["height"],
+            "duration": float(video.get("duration", 0)),
+        })
+    return results
 
 
 def _pick_pexels_file(video_files: list[dict]) -> dict | None:
@@ -145,20 +156,19 @@ def _pick_pexels_file(video_files: list[dict]) -> dict | None:
     return min(candidates, key=lambda f: abs(f["width"] - VIDEO_SIZE[0]))
 
 
-def search_pixabay(query: str, needed_duration: float) -> ClipCandidate | None:
-    """Search Pixabay videos; return the best candidate or None."""
+def _pixabay_request(query: str) -> list[dict]:
     api_key = os.getenv("PIXABAY_API_KEY")
     if not api_key:
-        return None
-
+        return []
+    _PIXABAY_LIMITER.wait()
     resp = requests.get(
         "https://pixabay.com/api/videos/",
-        params={"key": api_key, "q": query, "per_page": 15},
+        params={"key": api_key, "q": query, "per_page": RESULTS_PER_QUERY},
         timeout=REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
 
-    best, best_score = None, float("-inf")
+    results = []
     for hit in resp.json().get("hits", []):
         renditions = hit.get("videos", {})
         file = renditions.get("large") or renditions.get("medium")
@@ -167,19 +177,15 @@ def search_pixabay(query: str, needed_duration: float) -> ClipCandidate | None:
         width, height = file.get("width", 0), file.get("height", 0)
         if width <= height:
             continue
-        score = _score(width, height, hit.get("duration", 0), needed_duration)
-        if score > best_score:
-            best_score = score
-            best = ClipCandidate(
-                source="pixabay",
-                video_id=str(hit["id"]),
-                download_url=file["url"],
-                width=width,
-                height=height,
-                duration=float(hit.get("duration", 0)),
-                query=query,
-            )
-    return best
+        results.append({
+            "source": "pixabay",
+            "id": str(hit["id"]),
+            "url": file["url"],
+            "width": width,
+            "height": height,
+            "duration": float(hit.get("duration", 0)),
+        })
+    return results
 
 
 def _score(width: int, height: int, duration: float, needed: float) -> float:
@@ -197,33 +203,64 @@ def _score(width: int, height: int, duration: float, needed: float) -> float:
     return score
 
 
-def find_clip_for_scene(scene: Scene, used_ids: set[str]) -> ClipCandidate | None:
+def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str]) -> ClipCandidate | None:
     """
-    Find the best stock clip for a scene, trying progressively broader
-    queries: all keywords -> first two -> first one; Pexels first, then
-    Pixabay. Skips clips already used in this run.
+    Find the best stock clip for a scene.
+
+    - Alternates which provider is tried first (even scenes: Pexels,
+      odd scenes: Pixabay) to spread rate-limit load.
+    - Queries broaden progressively: all keywords -> first two -> first one.
+    - Prefers clips not yet used this run; if every candidate is already
+      used (long runs on narrow topics), reuses the best one rather than
+      failing — flagged in the log.
+    - Raises ClipSearchError if every search attempt errored.
     """
     queries = [
         " ".join(scene.keywords),
         " ".join(scene.keywords[:2]),
         scene.keywords[0] if scene.keywords else "",
     ]
-    # Deduplicate while preserving order, drop empties
     queries = list(dict.fromkeys(q for q in queries if q))
+    if not queries:
+        return None
 
-    errors = []
+    providers = ("pexels", "pixabay") if index % 2 == 0 else ("pixabay", "pexels")
+
+    errors: list[str] = []
     attempts = 0
-    for search in (search_pexels, search_pixabay):
+    best_used, best_used_score = None, float("-inf")
+
+    for provider in providers:
         for query in queries:
             attempts += 1
             try:
-                candidate = search(query, scene.duration)
+                results = _search(provider, query)
             except requests.RequestException as exc:
-                errors.append(f"{search.__name__}('{query}'): {exc}")
+                errors.append(f"{provider}('{query}'): {exc}")
                 continue
-            if candidate and f"{candidate.source}:{candidate.video_id}" not in used_ids:
-                used_ids.add(f"{candidate.source}:{candidate.video_id}")
-                return candidate
+
+            best_new, best_new_score = None, float("-inf")
+            for r in results:
+                score = _score(r["width"], r["height"], r["duration"], scene.duration)
+                candidate = ClipCandidate(
+                    source=r["source"], video_id=r["id"], download_url=r["url"],
+                    width=r["width"], height=r["height"], duration=r["duration"],
+                    query=query,
+                )
+                if candidate.key in used_ids:
+                    if score > best_used_score:
+                        best_used, best_used_score = candidate, score
+                elif score > best_new_score:
+                    best_new, best_new_score = candidate, score
+
+            if best_new is not None:
+                used_ids.add(best_new.key)
+                return best_new
+
+    if best_used is not None:
+        print(f"  Scene {index + 1}: all candidates already used — reusing "
+              f"{best_used.key} for '{best_used.query}'")
+        return best_used
 
     if errors and len(errors) == attempts:
         # Every single attempt errored — this is an API/network failure,
@@ -236,7 +273,7 @@ def find_clip_for_scene(scene: Scene, used_ids: set[str]) -> ClipCandidate | Non
 
 
 # ---------------------------------------------------------------------------
-# Step 4: download & trim
+# Step 4: download & trim (raw file deleted by the caller after render)
 # ---------------------------------------------------------------------------
 
 def download_clip(candidate: ClipCandidate, dest: Path) -> Path:
@@ -250,15 +287,17 @@ def download_clip(candidate: ClipCandidate, dest: Path) -> Path:
     return dest
 
 
-def prepare_scene_clip(scene: Scene, index: int, temp_dir: Path = TEMP_DIR) -> VideoClip:
+def fetch_scene_clip(scene: Scene, index: int, raw_dir: Path,
+                     used_ids: set[str]) -> tuple[VideoClip, Path]:
     """
-    Full Steps 3-4 for one scene: search, download, trim to scene duration,
-    and fit to 1920x1080 (scale to cover, center-crop).
+    Steps 3-4 for one scene: search, download, trim to scene duration, fit
+    to 1920x1080. Returns (clip, raw_path); the caller renders the scene
+    file and then deletes raw_path so raw downloads never pile up.
 
-    Raises ClipSearchError if no stock clip can be sourced — placeholders are
-    only ever used in explicit --demo mode, never as a silent fallback.
+    Raises ClipSearchError if no stock clip can be sourced — placeholders
+    are only ever used in explicit --demo mode, never as a silent fallback.
     """
-    candidate = find_clip_for_scene(scene, prepare_scene_clip._used_ids)
+    candidate = find_clip_for_scene(scene, index, used_ids)
     if candidate is None:
         raise ClipSearchError(
             f"Scene {index + 1}: no stock results on Pexels or Pixabay for "
@@ -266,13 +305,10 @@ def prepare_scene_clip(scene: Scene, index: int, temp_dir: Path = TEMP_DIR) -> V
             f"usable — try broader keywords)"
         )
 
-    path = temp_dir / f"scene_{index + 1:02d}_{candidate.source}_{candidate.video_id}.mp4"
-    print(f"  Scene {index + 1}: {candidate.source} #{candidate.video_id} "
-          f"({candidate.width}x{candidate.height}, {candidate.duration:.0f}s) "
-          f"for '{candidate.query}'")
-    download_clip(candidate, path)
+    raw_path = raw_dir / f"raw_{index + 1:04d}_{candidate.source}_{candidate.video_id}.mp4"
+    download_clip(candidate, raw_path)
 
-    clip = VideoFileClip(str(path)).without_audio()
+    clip = VideoFileClip(str(raw_path)).without_audio()
 
     # Trim to scene duration; loop if the source is shorter
     if clip.duration >= scene.duration:
@@ -280,11 +316,7 @@ def prepare_scene_clip(scene: Scene, index: int, temp_dir: Path = TEMP_DIR) -> V
     else:
         clip = clip.with_effects([vfx.Loop(duration=scene.duration)])
 
-    return _fit_to_frame(clip)
-
-
-# Track clip IDs used this run so scenes don't repeat footage
-prepare_scene_clip._used_ids = set()
+    return _fit_to_frame(clip), raw_path
 
 
 def _fit_to_frame(clip: VideoClip, size: tuple[int, int] = VIDEO_SIZE) -> VideoClip:

@@ -1,22 +1,32 @@
 """
-Video editing and assembly (moviepy v2 API).
+Video editing and assembly (moviepy v2 API + ffmpeg concat demuxer).
 
-Step 5: Concatenate scene clips with crossfade transitions.
+Step 5: Assemble scene clips. At scale (hundreds of scenes) the final stitch
+        uses ffmpeg's concat demuxer with stream copy — near-instant and
+        flat-memory — instead of moviepy. Every scene file is rendered with
+        identical codec settings so lossless concat is valid.
 Step 6: Burn in captions (scene text, timed per scene).
 Step 7: Export final MP4, 1920x1080, H.264.
 
-These functions accept any moviepy VideoClip, so they work identically
-with real stock footage (from clip_finder) or placeholder clips (demo mode).
+Transitions: the concat demuxer can only butt clips together, so true
+crossfades are replaced by a short fade to/from black baked into each scene
+file's edges (--transition fade), or clean hard cuts (--transition cut).
 """
 
+import subprocess
 from pathlib import Path
 
+from imageio_ffmpeg import get_ffmpeg_exe
 from moviepy import CompositeVideoClip, TextClip, VideoClip, vfx
 
 VIDEO_SIZE = (1920, 1080)
 FPS = 24
-TRANSITION_DURATION = 0.4  # seconds of crossfade between scenes
+FADE_DURATION = 0.2  # seconds faded to/from black at each scene edge
 CAPTION_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# Uniform encoder settings for every scene file — REQUIRED for the concat
+# demuxer's stream copy to produce a valid output
+_SCENE_ENCODE_ARGS = ["-crf", "23", "-pix_fmt", "yuv420p"]
 
 
 def add_caption(clip: VideoClip, text: str) -> VideoClip:
@@ -46,40 +56,59 @@ def add_caption(clip: VideoClip, text: str) -> VideoClip:
     return CompositeVideoClip([clip, caption], size=clip.size)
 
 
-def assemble_scenes(clips: list[VideoClip], transition: float = TRANSITION_DURATION) -> VideoClip:
+def apply_transition(clip: VideoClip, style: str = "fade") -> VideoClip:
+    """Bake the scene-edge transition into the clip ('fade' or 'cut')."""
+    if style == "fade":
+        return clip.with_effects([vfx.FadeIn(FADE_DURATION), vfx.FadeOut(FADE_DURATION)])
+    return clip
+
+
+def render_scene_file(clip: VideoClip, path: Path) -> Path:
     """
-    Concatenate scene clips in order with a crossfade between each (Step 5).
-
-    Each clip after the first starts `transition` seconds before the previous
-    one ends and fades in over that overlap.
+    Encode one finished scene (trimmed, captioned, transitioned) to disk
+    with the uniform settings that make lossless final concat possible.
     """
-    if not clips:
-        raise ValueError("No clips to assemble")
-
-    placed = [clips[0]]
-    current_end = clips[0].duration
-
-    for clip in clips[1:]:
-        clip = clip.with_effects([vfx.CrossFadeIn(transition)])
-        clip = clip.with_start(current_end - transition)
-        placed.append(clip)
-        current_end = clip.start + clip.duration
-
-    return CompositeVideoClip(placed, size=clips[0].size)
-
-
-def export_video(clip: VideoClip, output_path: str) -> str:
-    """
-    Export final video as MP4, H.264 (Step 7).
-    """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
+    path.parent.mkdir(parents=True, exist_ok=True)
     clip.write_videofile(
-        output_path,
+        str(path),
         fps=FPS,
         codec="libx264",
         audio=False,
-        preset="faster",
+        preset="veryfast",
         threads=4,
+        ffmpeg_params=_SCENE_ENCODE_ARGS,
+        logger=None,  # silence per-frame progress bars (hundreds of renders)
     )
+    return path
+
+
+def concat_scene_files(scene_files: list[Path], output_path: Path) -> Path:
+    """
+    Final assembly (Step 5 + 7) via ffmpeg's concat demuxer with stream
+    copy: no re-encode, near-instant, flat memory — unlike moviepy, which
+    gets slow and memory-heavy with hundreds of clips.
+    """
+    if not scene_files:
+        raise ValueError("No scene files to concatenate")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    list_file = output_path.with_suffix(".concat.txt")
+    list_file.write_text(
+        "".join(f"file '{Path(f).resolve()}'\n" for f in scene_files)
+    )
+
+    cmd = [
+        get_ffmpeg_exe(), "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    list_file.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg concat failed (exit {result.returncode}):\n{result.stderr[-2000:]}"
+        )
     return output_path

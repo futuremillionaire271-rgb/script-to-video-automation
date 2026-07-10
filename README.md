@@ -4,25 +4,32 @@ Convert a text script into an edited video automatically with stock footage, cap
 
 ## Pipeline Overview
 
-1. **Scene Splitting**: Break script into ~4-second scenes (respecting sentence boundaries)
+1. **Scene Splitting**: Break script into ~N-second scenes (default 4s, respecting sentence boundaries)
 2. **Keyword Extraction**: Extract 2-3 visual keywords per scene
-3. **Stock Footage Search**: Find matching clips via Pexels/Pixabay APIs
-4. **Download & Trim**: Download clips and trim to scene duration
-5. **Assemble**: Concatenate clips with 0.3-0.5s crossfade transitions
+3. **Stock Footage Search**: Find matching clips via Pexels/Pixabay APIs (alternating per scene, rate-limited, results cached 24h)
+4. **Download & Trim**: Download clips, trim to scene duration, delete raw files immediately
+5. **Assemble**: ffmpeg concat demuxer for the final stitch (fast at any scale); short fade or hard-cut transitions baked per scene
 6. **Captions**: Burn scene text as on-screen captions
 7. **Export**: Output final MP4 (1920x1080, H.264)
+
+Built to scale to 30+ minute videos (450+ scenes): API throttling, search caching,
+per-scene disk cleanup, and checkpoint-based resume after interruption.
 
 ## Project Structure
 
 ```
 .
-├── main.py                    # Entry point
+├── main.py                    # Entry point / orchestration
 ├── scene_parser.py            # Steps 1-2: Scene splitting & keyword extraction
 ├── clip_finder.py             # Steps 3-4: Stock footage search & download
 ├── editor.py                  # Steps 5-7: Assembly, captions, export
+├── api_limits.py              # Rate limiting, monthly budgets, search cache
+├── pipeline_state.py          # Checkpointing for resumable runs
 ├── test_scenes.py             # Test harness for scene breakdown
 ├── test_data/
 │   └── sample_script.txt      # Sample 78-second script for testing
+├── cache/                     # Search cache + API usage counters (created on first run)
+├── temp/                      # Scene clips + progress.json during a run
 ├── output/                    # Final video exports (created on first run)
 └── requirements.txt           # Python dependencies
 ```
@@ -54,37 +61,52 @@ This outputs:
 - Each scene's text, duration, and visual keywords
 - Total estimated video duration
 
-### Run Full Pipeline (WIP)
+### Run Full Pipeline
 
-Once all steps are implemented:
 ```bash
-python main.py test_data/sample_script.txt
-# or
-python main.py your_script.txt --keep-temp
+python main.py your_script.txt
 ```
 
-Outputs final video to `output/your_script_<timestamp>.mp4`
+Options:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--demo` | off | Placeholder visuals, no API keys/network needed |
+| `--scene-duration N` | 4.0 | Target scene length in seconds (6-8 recommended for 30+ min videos) |
+| `--transition fade\|cut` | fade | 0.2s fade to/from black at scene edges, or hard cuts |
+| `--progress-every N` | 10 | Progress line every N completed scenes |
+| `--keep-temp` | off | Keep scene clips + checkpoint after export |
+
+Outputs final video to `output/your_script_<timestamp>.mp4`.
+
+**Interrupted?** Just re-run the same command — progress is checkpointed to
+`temp/progress.json` after every scene, and completed scenes are skipped.
+(The checkpoint resets automatically if the script text or settings change.)
 
 ## Implementation Status
 
-- ✅ **Step 1**: Scene splitting (respects sentence boundaries, targets ~4s)
+- ✅ **Step 1**: Scene splitting (respects sentence boundaries, configurable target length)
 - ✅ **Step 2**: Keyword extraction (nouns + adjectives, rule-based)
-- ✅ **Step 3**: Stock footage search (Pexels primary, Pixabay fallback, broadening queries)
-- ✅ **Step 4**: Download & trim (streamed download, trim/loop to scene duration, fit to 1080p)
-- ✅ **Step 5**: Assembly with 0.4s crossfade transitions
+- ✅ **Step 3**: Stock footage search (Pexels + Pixabay alternating, throttled, cached, broadening queries)
+- ✅ **Step 4**: Download & trim (streamed download, trim/loop to scene duration, fit to 1080p, raw files deleted per scene)
+- ✅ **Step 5**: Assembly via ffmpeg concat demuxer (stream copy, no re-encode)
 - ✅ **Step 6**: Captions burned in per scene
 - ✅ **Step 7**: MP4 export (1920x1080, H.264)
-
-Run `python main.py <script.txt>` for the full pipeline (needs API keys in `.env`),
-or `python main.py <script.txt> --demo` for a no-network preview with placeholder visuals.
+- ✅ **Scale**: Rate limiting (Pexels 200/hr + 20k/month, Pixabay 100/60s), 24h search cache, resumable checkpoints, progress reporting
 
 ## Design Notes
 
 - **Modular**: Each step is independent, so you can test/swap/debug pieces separately
-- **Sentence Boundaries**: Scenes never split mid-sentence; long sentences may extend beyond 4s
+- **Sentence Boundaries**: Scenes never split mid-sentence; long sentences may extend beyond the target
 - **Speaking Pace**: Assumes 2.5 words/second for scene duration estimation
 - **Keywords**: Extracted via NLTK POS tagging; can be improved with semantic analysis later
-- **Temp Files**: Intermediate clips kept by default (enable `--keep-temp` to auto-clean after export)
+- **Temp Files**: Raw downloads are deleted per scene; trimmed scene clips are cleaned up
+  after a successful export unless `--keep-temp` is passed
+- **Transitions**: The concat demuxer can't overlap clips, so true crossfades are replaced
+  by short fades baked into each scene's edges (`--transition cut` for hard cuts)
+- **Clip Variety**: Clips aren't reused across scenes while unused candidates remain;
+  on very long runs with narrow topics, the best already-used clip is reused (logged)
+  rather than failing
 
 ## Dependencies
 
