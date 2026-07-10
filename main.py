@@ -103,6 +103,9 @@ def main():
                              'and exit — hand-edit keywords, then re-run with --use-plan')
     parser.add_argument('--use-plan', type=Path, default=None, metavar='JSON',
                         help='Override scene keywords from an edited plan file')
+    parser.add_argument('--limit', type=int, default=None, metavar='N',
+                        help='Render only the first N scenes — for a quick style proof '
+                             'before committing to a long full render')
     parser.add_argument('--progress-every', type=int, default=10, metavar='N',
                         help='Print a progress line every N completed scenes (default: 10)')
     parser.add_argument('--workers', type=int,
@@ -160,7 +163,7 @@ def _run_pipeline(args, script_path: Path):
         return
     if args.use_plan is not None:
         plan = json.loads(args.use_plan.read_text())
-        if len(plan) != len(scenes):
+        if len(plan) < len(scenes):
             raise RuntimeError(
                 f"Plan has {len(plan)} scenes but the script splits into "
                 f"{len(scenes)} — re-export the plan after script/settings changes."
@@ -168,6 +171,12 @@ def _run_pipeline(args, script_path: Path):
         for entry, scene in zip(plan, scenes):
             scene.keywords = list(entry["keywords"])
         print(f"Applied keyword overrides from {args.use_plan}")
+
+    # Style-proof: render only the first N scenes
+    if args.limit is not None and args.limit < len(scenes):
+        scenes = scenes[:args.limit]
+        print(f"--limit {args.limit}: rendering only the first {len(scenes)} scenes "
+              f"({scenes[-1].end_time:.1f}s) as a proof.")
 
     # Documentary treatment plans (deterministic — resume-safe)
     from effects import plan_transitions, plan_motion, scene_edge_styles

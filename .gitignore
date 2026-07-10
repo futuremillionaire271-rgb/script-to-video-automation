@@ -52,3 +52,8 @@ temp/
 cache/
 output/*.mp4
 output/*.log
+
+# User-provided media (voiceovers, uploaded audio/video)
+my_scripts/*.mp3
+my_scripts/*.wav
+my_scripts/*.m4a
