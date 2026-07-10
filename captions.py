@@ -1,24 +1,20 @@
 """
-Animated "karaoke" captions — the strongest visual signal of a humanized,
-modern YouTube/documentary edit.
+Animated "karaoke" captions, phrase-chunked.
 
-Words appear as a bold lower-third block. The word being spoken is
-highlighted with a colored pill and scaled up; already-spoken words stay
-solid white; upcoming words are dimmed. Timing is distributed across the
-scene duration (and, with a voiceover, the scene duration already matches
-the narration), so the highlight tracks the voice.
+Modern YouTube/documentary captions show a few words at a time — never a
+whole paragraph — with the spoken word highlighted. This module:
 
-Implementation notes:
-- The caption only changes when the active word changes, so we render one
-  PIL image per active-word state (~1 per word) and show each for its slice.
-  That keeps rendering cheap even at hundreds of scenes.
-- Layout is computed once at the base font size and never reflows; the
-  active-word emphasis is drawn as a pill + color, not a size change to the
-  layout, so text never jitters.
+- Splits a scene's text into short CHUNKS that each fit in at most 2 lines,
+  breaking preferentially at punctuation (where a speaker pauses).
+- Shows one chunk at a time for its slice of the scene, so no more than two
+  lines are ever on screen.
+- Within the active chunk, highlights the current word with a gold pill and
+  keeps the scene's keywords gold. Because chunks are short and punctuation-
+  aligned, the highlight tracks the voice far more tightly than a full
+  sentence would.
 """
 
 import re
-from dataclasses import dataclass
 
 import numpy as np
 from moviepy import CompositeVideoClip, ImageClip, VideoClip
@@ -26,22 +22,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 CAPTION_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
-# Colors (RGBA)
-COLOR_SPOKEN = (255, 255, 255, 255)      # words already said
-COLOR_UPCOMING = (235, 235, 235, 130)    # words not yet said (dimmed)
-COLOR_ACTIVE = (17, 17, 17, 255)         # active word text (dark, on pill)
-PILL_COLOR = (255, 209, 71, 255)         # gold highlight pill
+COLOR_SPOKEN = (255, 255, 255, 255)
+COLOR_UPCOMING = (232, 232, 232, 140)
+COLOR_ACTIVE = (17, 17, 17, 255)
+COLOR_KEY = (255, 214, 92, 255)
+PILL_COLOR = (255, 209, 71, 255)
 STROKE_COLOR = (0, 0, 0, 235)
 SHADOW_COLOR = (0, 0, 0, 150)
 
-
-@dataclass
-class _Word:
-    text: str        # display text (with original punctuation)
-    x: float         # left x in the caption image
-    y: float         # top y
-    w: float         # rendered width
-    is_key: bool     # part of the scene's keywords -> always emphasized
+MAX_LINES = 2
+MAX_WORDS_PER_CHUNK = 7   # keeps highlight drift small within a chunk
 
 
 def _keyword_set(keywords) -> set[str]:
@@ -52,131 +42,144 @@ def _keyword_set(keywords) -> set[str]:
     return words
 
 
-def _layout(text: str, font: ImageFont.FreeTypeFont, max_width: float,
-            keywords: set[str], line_h: int, pad: int):
-    """Wrap words to width; return (list[_Word], image_width, image_height)."""
+def _wrap_lines(words, font, max_width):
+    """Return list of lines (each a list of words) for the given words."""
     space_w = font.getlength(" ")
-    tokens = text.split()
-
-    # First pass: group into lines
-    lines: list[list[str]] = [[]]
-    widths = [0.0]
-    for tok in tokens:
+    lines = [[]]
+    width = 0.0
+    for tok in words:
         tw = font.getlength(tok)
-        cur = lines[-1]
-        cur_w = widths[-1]
-        if cur and cur_w + space_w + tw > max_width:
+        if lines[-1] and width + space_w + tw > max_width:
             lines.append([tok])
-            widths.append(tw)
+            width = tw
         else:
-            widths[-1] = cur_w + (space_w if cur else 0) + tw
-            cur.append(tok)
-
-    img_w = int(max_width) + pad * 2
-    img_h = line_h * len(lines) + pad * 2
-
-    words: list[_Word] = []
-    for li, line in enumerate(lines):
-        line_w = widths[li]
-        x = (img_w - line_w) / 2
-        y = pad + li * line_h
-        for tok in line:
-            tw = font.getlength(tok)
-            clean = re.sub(r"[^\w'-]", "", tok).lower()
-            words.append(_Word(tok, x, y, tw, clean in keywords))
-            x += tw + space_w
-    return words, img_w, img_h
+            width += (space_w if lines[-1] else 0) + tw
+            lines[-1].append(tok)
+    return lines
 
 
-def _render_state(words, active_idx, img_w, img_h, font, line_h) -> np.ndarray:
-    """Render the caption image for the given active-word index (RGBA array)."""
+def _chunk_text(text, font, max_width):
+    """
+    Split text into caption chunks that each fit in <= MAX_LINES lines.
+    Prefer to end a chunk at punctuation so chunk boundaries fall on natural
+    speech pauses.
+    """
+    tokens = text.split()
+    chunks = []
+    cur = []
+    for tok in tokens:
+        cur.append(tok)
+        lines = _wrap_lines(cur, font, max_width)
+        too_tall = len(lines) > MAX_LINES
+        too_long = len(cur) >= MAX_WORDS_PER_CHUNK
+        ends_sentence = tok[-1] in ".!?" if tok else False
+        ends_clause = tok[-1] in ",;:" if tok else False
+
+        if too_tall:
+            # Roll the last word into a fresh chunk
+            chunks.append(cur[:-1])
+            cur = [tok]
+        elif (ends_sentence and len(cur) >= 2) or (too_long and (ends_clause or ends_sentence)):
+            chunks.append(cur)
+            cur = []
+        elif too_long:
+            chunks.append(cur)
+            cur = []
+    if cur:
+        chunks.append(cur)
+    return [c for c in chunks if c]
+
+
+def _render_chunk_state(words, active_idx, keyset, img_w, img_h, font, line_h, pad):
+    """Render one chunk with `active_idx` highlighted -> RGBA array."""
     img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     stroke = max(3, font.size // 9)
-    pill_pad_x = int(font.size * 0.22)
-    pill_pad_y = int(font.size * 0.12)
+    pill_px = int(font.size * 0.22)
+    pill_py = int(font.size * 0.10)
     radius = int(font.size * 0.28)
     ascent, descent = font.getmetrics()
     text_h = ascent + descent
+    space_w = font.getlength(" ")
 
-    for i, wd in enumerate(words):
-        active = i == active_idx
-        emphasized = active or wd.is_key
-
-        # Drop shadow for all words (depth + legibility on any footage)
-        draw.text((wd.x + stroke, wd.y + stroke), wd.text, font=font,
-                  fill=SHADOW_COLOR, stroke_width=stroke, stroke_fill=SHADOW_COLOR)
-
-        if active:
-            # Gold pill behind the spoken word
-            x0 = wd.x - pill_pad_x
-            y0 = wd.y - pill_pad_y
-            x1 = wd.x + wd.w + pill_pad_x
-            y1 = wd.y + text_h + pill_pad_y
-            draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=PILL_COLOR)
-            draw.text((wd.x, wd.y), wd.text, font=font, fill=COLOR_ACTIVE)
-        else:
-            if i < active_idx:
-                color = (255, 214, 92, 255) if wd.is_key else COLOR_SPOKEN
+    lines = _wrap_lines(words, font, img_w - pad * 2)
+    idx = 0
+    for li, line in enumerate(lines):
+        line_w = sum(font.getlength(w) for w in line) + space_w * (len(line) - 1)
+        x = (img_w - line_w) / 2
+        y = pad + li * line_h
+        for tok in line:
+            clean = re.sub(r"[^\w'-]", "", tok).lower()
+            is_key = clean in keyset
+            active = idx == active_idx
+            draw.text((x + stroke, y + stroke), tok, font=font, fill=SHADOW_COLOR,
+                      stroke_width=stroke, stroke_fill=SHADOW_COLOR)
+            if active:
+                draw.rounded_rectangle(
+                    [x - pill_px, y - pill_py, x + font.getlength(tok) + pill_px,
+                     y + text_h + pill_py], radius=radius, fill=PILL_COLOR)
+                draw.text((x, y), tok, font=font, fill=COLOR_ACTIVE)
             else:
-                color = (255, 214, 92, 190) if wd.is_key else COLOR_UPCOMING
-            draw.text((wd.x, wd.y), wd.text, font=font, fill=color,
-                      stroke_width=stroke, stroke_fill=STROKE_COLOR)
-
+                if idx < active_idx:
+                    color = COLOR_KEY if is_key else COLOR_SPOKEN
+                else:
+                    color = (255, 214, 92, 190) if is_key else COLOR_UPCOMING
+                draw.text((x, y), tok, font=font, fill=color,
+                          stroke_width=stroke, stroke_fill=STROKE_COLOR)
+            x += font.getlength(tok) + space_w
+            idx += 1
     return np.array(img)
 
 
 def make_karaoke_caption(text: str, keywords, duration: float,
                          size: tuple[int, int]) -> VideoClip:
-    """
-    Build an animated karaoke caption clip (transparent background) for one
-    scene. Composite it over the scene's video with .with_position.
-    """
+    """Animated, phrase-chunked karaoke caption (transparent background)."""
     frame_w, frame_h = size
-    font_size = int(frame_h * 0.055)          # big, bold, readable
+    font_size = int(frame_h * 0.052)
     font = ImageFont.truetype(CAPTION_FONT, font_size)
-    max_width = int(frame_w * 0.80)
-    line_h = int(font_size * 1.42)
-    pad = int(font_size * 0.7)
+    max_width = int(frame_w * 0.78)
+    line_h = int(font_size * 1.4)
+    pad = int(font_size * 0.6)
     keyset = _keyword_set(list(keywords))
 
-    words, img_w, img_h = _layout(text, font, max_width, keyset, line_h, pad)
-    if not words:
-        # No text: return a fully transparent clip
+    chunks = _chunk_text(text, font, max_width)
+    if not chunks:
         empty = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
         return ImageClip(empty).with_mask(
             ImageClip(np.zeros((frame_h, frame_w)), is_mask=True)
         ).with_duration(duration)
 
-    # Distribute time across words, weighted by length (longer words dwell
-    # a little longer) — approximates natural speech cadence.
-    weights = np.array([max(1.0, len(w.text)) for w in words])
-    ends = np.cumsum(weights) / weights.sum() * duration
-    starts = np.concatenate([[0.0], ends[:-1]])
+    # Time per chunk, weighted by total characters (longer phrase -> longer)
+    chunk_weights = np.array([sum(len(w) for w in c) for c in chunks], dtype=float)
+    chunk_ends = np.cumsum(chunk_weights) / chunk_weights.sum() * duration
+    chunk_starts = np.concatenate([[0.0], chunk_ends[:-1]])
 
-    # Position of the caption block: lower third, centered
-    pos_x = (frame_w - img_w) // 2
-    pos_y = int(frame_h - img_h - frame_h * 0.06)
-
+    img_h = line_h * MAX_LINES + pad * 2
+    pos_y = int(frame_h - img_h - frame_h * 0.055)
     state_clips = []
-    for i in range(len(words)):
-        arr = _render_state(words, i, img_w, img_h, font, line_h)
-        seg_dur = max(0.02, ends[i] - starts[i])
-        rgb = arr[..., :3]
-        alpha = arr[..., 3] / 255.0
-        clip = (
-            ImageClip(rgb)
-            .with_mask(ImageClip(alpha, is_mask=True))
-            .with_start(starts[i])
-            .with_duration(seg_dur)
-            .with_position((pos_x, pos_y))
-        )
-        state_clips.append(clip)
+
+    for ci, words in enumerate(chunks):
+        c_start = chunk_starts[ci]
+        c_dur = max(0.05, chunk_ends[ci] - c_start)
+        # Per-word windows inside the chunk, weighted by word length
+        w_weights = np.array([max(1.0, len(w)) for w in words], dtype=float)
+        w_ends = np.cumsum(w_weights) / w_weights.sum() * c_dur
+        w_starts = np.concatenate([[0.0], w_ends[:-1]])
+        for wi in range(len(words)):
+            arr = _render_chunk_state(words, wi, keyset, frame_w, img_h, font, line_h, pad)
+            seg_dur = max(0.03, w_ends[wi] - w_starts[wi])
+            clip = (
+                ImageClip(arr[..., :3])
+                .with_mask(ImageClip(arr[..., 3] / 255.0, is_mask=True))
+                .with_start(c_start + w_starts[wi])
+                .with_duration(seg_dur)
+                .with_position((0, pos_y))
+            )
+            state_clips.append(clip)
 
     return CompositeVideoClip(state_clips, size=size).with_duration(duration)
 
 
 def burn_captions(clip: VideoClip, text: str, keywords) -> VideoClip:
-    """Composite an animated karaoke caption over a scene clip."""
     caption = make_karaoke_caption(text, keywords, clip.duration, clip.size)
     return CompositeVideoClip([clip, caption], size=clip.size)

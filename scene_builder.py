@@ -11,10 +11,12 @@ from pathlib import Path
 
 from moviepy import VideoFileClip, concatenate_videoclips, vfx
 
+from callouts import add_callout
 from captions import burn_captions
 from clip_finder import ClipCandidate, download_clip, _fit_to_frame, make_placeholder_clip
 from editor import render_scene_file
-from effects import add_vignette, apply_edges, apply_grade, apply_motion, punch_in
+from effects import (SUBSHOT_OVERLAP, add_vignette, apply_edges, apply_grade,
+                     apply_motion, punch_in)
 from scene_parser import Scene
 
 
@@ -46,7 +48,16 @@ def render_scene_job(job: dict) -> int:
             d = shot["duration"]
             c = c.subclipped(0, d) if c.duration >= d else c.with_effects([vfx.Loop(duration=d)])
             sources.append(_fit_to_frame(c))
-        clip = sources[0] if len(sources) == 1 else concatenate_videoclips(sources)
+        if len(sources) == 1:
+            clip = sources[0]
+        else:
+            # Crossfade between the sub-shots within a scene. Shots were cut
+            # SUBSHOT_OVERLAP longer (in make_job) so the overlap leaves the
+            # scene at exactly its intended duration.
+            faded = [sources[0]] + [
+                s.with_effects([vfx.CrossFadeIn(SUBSHOT_OVERLAP)]) for s in sources[1:]
+            ]
+            clip = concatenate_videoclips(faded, method="compose", padding=-SUBSHOT_OVERLAP)
 
     # Documentary treatment: motion -> grade -> caption -> edge transitions
     in_style = job["in_style"]
@@ -60,6 +71,8 @@ def render_scene_job(job: dict) -> int:
         clip = add_vignette(apply_grade(clip))
 
     clip = burn_captions(clip, scene.text, scene.keywords)
+    if job.get("callout", True):
+        clip = add_callout(clip, scene.text)
     clip = apply_edges(clip, in_style, job["out_style"])
 
     render_scene_file(clip, Path(job["scene_file"]))

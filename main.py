@@ -90,6 +90,8 @@ def main():
                         help='Disable Ken Burns motion (faster renders)')
     parser.add_argument('--no-grade', action='store_true',
                         help='Disable the contrast grade + vignette look')
+    parser.add_argument('--no-callout', action='store_true',
+                        help='Disable on-screen entity callouts (place/person/number tags)')
     parser.add_argument('--music', type=Path, default=None, metavar='AUDIO',
                         help='Background music file — looped, ducked under narration, '
                              'faded in/out')
@@ -180,7 +182,8 @@ def _run_pipeline(args, script_path: Path):
               f"({scenes[-1].end_time:.1f}s) as a proof.")
 
     # Documentary treatment plans (deterministic — resume-safe)
-    from effects import plan_transitions, plan_motion, scene_edge_styles
+    from effects import (SUBSHOT_OVERLAP, plan_transitions, plan_motion,
+                         scene_edge_styles)
     boundaries = plan_transitions(len(scenes)) if args.transition == 'varied' else None
     motion_plan = None if args.no_motion else plan_motion(len(scenes))
 
@@ -188,7 +191,8 @@ def _run_pipeline(args, script_path: Path):
     # invalidate old rendered scenes so they re-render with new footage.
     keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
-                f"motion={not args.no_motion}|grade={not args.no_grade}|v2|"
+                f"motion={not args.no_motion}|grade={not args.no_grade}|"
+                f"callout={not args.no_callout}|v3|"
                 f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)
@@ -248,7 +252,9 @@ def _run_pipeline(args, script_path: Path):
                               max(1, math.ceil(scene.duration / args.max_shot)))
             else:
                 n_shots = 1
-            shot_duration = scene.duration / n_shots
+            # Sub-shots are cut SUBSHOT_OVERLAP longer so the crossfade
+            # overlap leaves the assembled scene at exactly scene.duration.
+            shot_duration = (scene.duration + SUBSHOT_OVERLAP * (n_shots - 1)) / n_shots
             shots = []
             for _ in range(n_shots):
                 candidate = find_clip_for_scene(scene, i, used_ids)
@@ -270,6 +276,7 @@ def _run_pipeline(args, script_path: Path):
                        if (motion_plan is not None and in_style not in ("punch", "zoompunch"))
                        else None),
             "grade": not args.no_grade,
+            "callout": not args.no_callout,
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),
         }

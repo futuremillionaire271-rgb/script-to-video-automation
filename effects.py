@@ -24,6 +24,9 @@ FADE_WHITE_DURATION = 0.10
 # Motion is deliberately strong now — the previous 7% over 7s was invisible.
 MOTION_STRENGTH = 0.22
 
+# Crossfade overlap between sub-shots within a single scene.
+SUBSHOT_OVERLAP = 0.25
+
 
 def plan_transitions(n_scenes: int, seed: int = 42) -> list[str]:
     """
