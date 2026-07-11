@@ -118,6 +118,37 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
 # When a concept repeats across many scenes, rotate its visual so the
 # video doesn't show the same kind of shot six times.
 VISUAL_ALTERNATES: dict[str, list[str]] = {
+    "different drinks in glasses on table": [
+        "different drinks in glasses on table",
+        "man holding drink glass evening",
+        "refreshing drink glass close up",
+        "person pouring drink at home",
+    ],
+    "glass of water on wooden table": [
+        "glass of water on wooden table",
+        "clear water glass daylight",
+        "still water in drinking glass",
+    ],
+    "hand holding glass of drinking water": [
+        "hand holding glass of drinking water",
+        "woman holding water glass smiling",
+        "close up hand picking up water glass",
+    ],
+    "man sleeping with cpap mask sleep apnea": [
+        "man sleeping with cpap mask sleep apnea",
+        "sleep study patient monitoring clinic",
+        "man sleeping restless breathing night",
+    ],
+    "man chugging water bottle fast thirsty": [
+        "man chugging water bottle fast thirsty",
+        "athlete drinking whole bottle of water",
+        "thirsty man gulping water",
+    ],
+    "pouring hot tea into cup steam": [
+        "pouring hot tea into cup steam",
+        "tea cup with steam close up",
+        "senior woman drinking tea",
+    ],
     "kidney human anatomy 3d medical animation": [
         "kidney human anatomy 3d medical animation",
         "doctor showing anatomy on tablet to patient",
