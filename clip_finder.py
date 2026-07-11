@@ -399,15 +399,34 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
 # Step 4: download & trim (raw file deleted by the caller after render)
 # ---------------------------------------------------------------------------
 
-def download_clip(candidate: ClipCandidate, dest: Path) -> Path:
-    """Download a stock clip to dest (streamed to keep memory flat)."""
+def download_clip(candidate: ClipCandidate, dest: Path, retries: int = 4) -> Path:
+    """
+    Download a stock clip to dest (streamed to keep memory flat).
+
+    Retries on transient network errors (connection reset, timeout) with
+    exponential backoff — a single blip must never crash a long render.
+    """
+    import time as _time
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(candidate.download_url, stream=True, timeout=60) as resp:
-        resp.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
-    return dest
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            with requests.get(candidate.download_url, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                with open(dest, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+            if dest.stat().st_size > 0:
+                return dest
+            raise requests.RequestException("empty download")
+        except (requests.RequestException, OSError) as exc:
+            last_exc = exc
+            dest.unlink(missing_ok=True)
+            if attempt < retries - 1:
+                _time.sleep(2 ** attempt)  # 1s, 2s, 4s
+    raise ClipSearchError(
+        f"download failed after {retries} attempts for {candidate.key}: {last_exc}"
+    )
 
 
 def fetch_scene_clip(scene: Scene, index: int, raw_dir: Path, used_ids: set[str],

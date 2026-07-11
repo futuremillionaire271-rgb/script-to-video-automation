@@ -430,7 +430,21 @@ def _run_pipeline(args, script_path: Path):
                 done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
                 for fut in done:
                     i, scene_file = in_flight.pop(fut)
-                    fut.result()  # re-raises worker failures
+                    try:
+                        fut.result()  # re-raises worker failures
+                    except Exception as exc:
+                        # One scene failing (e.g. a rare network/codec blip)
+                        # must not throw away all the completed work. Retry
+                        # the scene synchronously once; only then give up.
+                        print(f"  Scene {i + 1} failed ({str(exc)[:120]}) — retrying once")
+                        try:
+                            render_scene_job(make_job(i))
+                        except Exception as exc2:
+                            raise RuntimeError(
+                                f"Scene {i + 1} failed twice: {str(exc2)[:200]}. "
+                                f"{len(scene_paths)} scenes are checkpointed — "
+                                f"re-run the same command to resume."
+                            ) from exc2
                     scene_paths[i] = Path(scene_file)
                     checkpoint.mark_done(i, Path(scene_file), used_ids)
                     rendered_this_run += 1
