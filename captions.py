@@ -144,9 +144,58 @@ def _render_chunk_state(words, active_idx, keyset, img_w, img_h, font, line_h, p
     return np.array(img)
 
 
+def _word_windows(chunks, duration: float, word_times):
+    """
+    Absolute display windows for every (chunk, word) state.
+
+    With word_times (real Whisper timestamps per token, relative to the
+    scene start): the highlight moves exactly when the narrator says each
+    word — a chunk appears at its first word and holds until the next
+    chunk's first word.
+
+    Without word_times: estimated windows weighted by word length.
+    Returns [(chunk_idx, word_idx, start, end)].
+    """
+    windows = []
+    if word_times is not None:
+        tok = 0
+        chunk_spans = []
+        for words in chunks:
+            chunk_spans.append((tok, tok + len(words)))
+            tok += len(words)
+        for ci, (a, b) in enumerate(chunk_spans):
+            chunk_disp_end = (chunk_spans[ci + 1][0] < len(word_times)
+                              and word_times[chunk_spans[ci + 1][0]][0]
+                              if ci + 1 < len(chunk_spans) else duration) or duration
+            for wi, ti in enumerate(range(a, b)):
+                w_start = word_times[ti][0] if wi > 0 else (
+                    word_times[a][0] if ci > 0 else 0.0)
+                w_end = (word_times[ti + 1][0] if ti + 1 < b else chunk_disp_end)
+                windows.append((ci, wi, w_start, max(w_end, w_start + 0.03)))
+    else:
+        chunk_weights = np.array([sum(len(w) for w in c) for c in chunks], dtype=float)
+        chunk_ends = np.cumsum(chunk_weights) / chunk_weights.sum() * duration
+        chunk_starts = np.concatenate([[0.0], chunk_ends[:-1]])
+        for ci, words in enumerate(chunks):
+            c_start = chunk_starts[ci]
+            c_dur = max(0.05, chunk_ends[ci] - c_start)
+            w_weights = np.array([max(1.0, len(w)) for w in words], dtype=float)
+            w_ends = np.cumsum(w_weights) / w_weights.sum() * c_dur
+            w_starts = np.concatenate([[0.0], w_ends[:-1]])
+            for wi in range(len(words)):
+                windows.append((ci, wi, c_start + w_starts[wi],
+                                c_start + w_ends[wi]))
+    return windows
+
+
 def make_karaoke_caption(text: str, keywords, duration: float,
-                         size: tuple[int, int]) -> VideoClip:
-    """Animated, phrase-chunked karaoke caption (transparent background)."""
+                         size: tuple[int, int], word_times=None) -> VideoClip:
+    """
+    Animated, phrase-chunked karaoke caption (transparent background).
+    word_times: optional [(start, end)] per word of text.split(), relative
+    to the scene start (from Whisper alignment) — locks the highlight to
+    the narrator's actual voice.
+    """
     frame_w, frame_h = size
     font_size = int(frame_h * 0.052)
     font = ImageFont.truetype(CAPTION_FONT, font_size)
@@ -162,37 +211,31 @@ def make_karaoke_caption(text: str, keywords, duration: float,
             ImageClip(np.zeros((frame_h, frame_w)), is_mask=True)
         ).with_duration(duration)
 
-    # Time per chunk, weighted by total characters (longer phrase -> longer)
-    chunk_weights = np.array([sum(len(w) for w in c) for c in chunks], dtype=float)
-    chunk_ends = np.cumsum(chunk_weights) / chunk_weights.sum() * duration
-    chunk_starts = np.concatenate([[0.0], chunk_ends[:-1]])
+    if word_times is not None and len(word_times) != sum(len(c) for c in chunks):
+        word_times = None  # token mismatch — fall back to estimates
 
     img_h = line_h * MAX_LINES + pad * 2
     pos_y = int(frame_h - img_h - frame_h * 0.055)
     state_clips = []
 
-    for ci, words in enumerate(chunks):
-        c_start = chunk_starts[ci]
-        c_dur = max(0.05, chunk_ends[ci] - c_start)
-        # Per-word windows inside the chunk, weighted by word length
-        w_weights = np.array([max(1.0, len(w)) for w in words], dtype=float)
-        w_ends = np.cumsum(w_weights) / w_weights.sum() * c_dur
-        w_starts = np.concatenate([[0.0], w_ends[:-1]])
-        for wi in range(len(words)):
-            arr = _render_chunk_state(words, wi, keyset, frame_w, img_h, font, line_h, pad)
-            seg_dur = max(0.03, w_ends[wi] - w_starts[wi])
-            clip = (
-                ImageClip(arr[..., :3])
-                .with_mask(ImageClip(arr[..., 3] / 255.0, is_mask=True))
-                .with_start(c_start + w_starts[wi])
-                .with_duration(seg_dur)
-                .with_position((0, pos_y))
-            )
-            state_clips.append(clip)
+    for ci, wi, w_start, w_end in _word_windows(chunks, duration, word_times):
+        w_start = min(max(w_start, 0.0), max(duration - 0.03, 0.0))
+        w_end = min(max(w_end, w_start + 0.03), duration)
+        arr = _render_chunk_state(chunks[ci], wi, keyset, frame_w, img_h,
+                                  font, line_h, pad)
+        clip = (
+            ImageClip(arr[..., :3])
+            .with_mask(ImageClip(arr[..., 3] / 255.0, is_mask=True))
+            .with_start(w_start)
+            .with_duration(w_end - w_start)
+            .with_position((0, pos_y))
+        )
+        state_clips.append(clip)
 
     return CompositeVideoClip(state_clips, size=size).with_duration(duration)
 
 
-def burn_captions(clip: VideoClip, text: str, keywords) -> VideoClip:
-    caption = make_karaoke_caption(text, keywords, clip.duration, clip.size)
+def burn_captions(clip: VideoClip, text: str, keywords, word_times=None) -> VideoClip:
+    caption = make_karaoke_caption(text, keywords, clip.duration, clip.size,
+                                   word_times=word_times)
     return CompositeVideoClip([clip, caption], size=clip.size)

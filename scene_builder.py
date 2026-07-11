@@ -70,7 +70,8 @@ def render_scene_job(job: dict) -> int:
     if job["grade"]:
         clip = add_vignette(apply_grade(clip))
 
-    clip = burn_captions(clip, scene.text, scene.keywords)
+    clip = burn_captions(clip, scene.text, scene.keywords,
+                         word_times=job.get("word_times"))
     if job.get("callout", True):
         clip = add_callout(clip, scene.text)
     clip = apply_edges(clip, in_style, job["out_style"])

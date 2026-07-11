@@ -79,6 +79,8 @@ def main():
                         help='Disable the contrast grade + vignette look')
     parser.add_argument('--no-callout', action='store_true',
                         help='Disable on-screen entity callouts (place/person/number tags)')
+    parser.add_argument('--no-vision', action='store_true',
+                        help='Skip CLIP visual verification of stock candidates')
     parser.add_argument('--music', type=Path, default=None, metavar='AUDIO',
                         help='Background music file — looped, ducked under narration, '
                              'faded in/out')
@@ -128,21 +130,56 @@ def _run_pipeline(args, script_path: Path):
     print(f"Loading script: {script_path}")
     script = load_script(str(script_path))
 
+    scene_word_times = None
     if args.voiceover is not None:
-        # Align scene boundaries to the narrator's actual pauses — this is
-        # what keeps captions locked to the voice over long videos.
-        from align import align_sentences
+        # Align to the narrator's actual voice. Preferred: Whisper word
+        # timestamps (every word's true spoken time). Fallback: pause
+        # detection from the waveform.
         from nltk.tokenize import sent_tokenize
         from scene_parser import split_into_scenes_aligned
         sentences = sent_tokenize(script.strip())
-        print(f"Aligning {len(sentences)} sentences to the voiceover's pause structure...")
-        times = align_sentences([len(s.split()) for s in sentences],
-                                str(args.voiceover))
-        pace = sum(len(s.split()) for s in sentences) / max(times[-1][1], 1e-6)
-        print(f"  voiceover: {times[-1][1]:.1f}s | pace {pace:.2f} words/sec | "
-              f"boundaries snapped to detected pauses")
+        tokens = script.split()
+        word_times = None
+        try:
+            from align import align_words
+            print(f"Aligning {len(tokens)} script words to the voiceover (Whisper)...")
+            word_times = align_words(tokens, str(args.voiceover))
+        except Exception as exc:
+            print(f"  Whisper alignment unavailable ({str(exc)[:100]}) — "
+                  f"falling back to pause detection")
+            from align import align_sentences
+            times = align_sentences([len(s.split()) for s in sentences],
+                                    str(args.voiceover))
+
+        if word_times is not None:
+            # Sentence spans from their words' true times
+            times = []
+            ptr = 0
+            for s in sentences:
+                n = len(s.split())
+                times.append((word_times[ptr][0], word_times[ptr + n - 1][1]))
+                ptr += n
+            # Video timeline starts at 0 even if narration starts later
+            times[0] = (0.0, times[0][1])
+
+        pace = len(tokens) / max(times[-1][1], 1e-6)
+        print(f"  voiceover: {times[-1][1]:.1f}s | pace {pace:.2f} words/sec")
         scenes = split_into_scenes_aligned(script, times,
                                            target_duration=args.scene_duration)
+
+        if word_times is not None:
+            # Per-scene word times, relative to each scene's start — these
+            # drive the karaoke highlight to the narrator's exact voice
+            scene_word_times = []
+            ptr = 0
+            for sc in scenes:
+                n = len(sc.text.split())
+                span = word_times[ptr:ptr + n]
+                scene_word_times.append(
+                    [(max(0.0, s - sc.start_time), max(0.05, e - sc.start_time))
+                     for s, e in span]
+                )
+                ptr += n
     else:
         pace = args.wps if args.wps is not None else 2.5
         print("Splitting into scenes and extracting keywords...")
@@ -189,7 +226,7 @@ def _run_pipeline(args, script_path: Path):
     keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
                 f"motion={not args.no_motion}|grade={not args.no_grade}|"
-                f"callout={not args.no_callout}|v4-aligned|"
+                f"callout={not args.no_callout}|v5-whisper|"
                 f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)
@@ -254,7 +291,8 @@ def _run_pipeline(args, script_path: Path):
             shot_duration = (scene.duration + SUBSHOT_OVERLAP * (n_shots - 1)) / n_shots
             shots = []
             for _ in range(n_shots):
-                candidate = find_clip_for_scene(scene, i, used_ids)
+                candidate = find_clip_for_scene(scene, i, used_ids,
+                                                use_vision=not args.no_vision)
                 if candidate is None:
                     raise ClipSearchError(
                         f"Scene {i + 1}: no stock results on Pexels or Pixabay for "
@@ -274,6 +312,7 @@ def _run_pipeline(args, script_path: Path):
                        else None),
             "grade": not args.no_grade,
             "callout": not args.no_callout,
+            "word_times": scene_word_times[i] if scene_word_times else None,
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),
         }

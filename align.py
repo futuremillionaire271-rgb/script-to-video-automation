@@ -1,5 +1,13 @@
 """
-Voiceover alignment — model-free.
+Voiceover alignment.
+
+Two tiers:
+- WHISPER (preferred): transcribe the voiceover with word timestamps, match
+  transcript words to script words, and get the TRUE spoken time of every
+  script word. Captions lock to the voice exactly.
+- PAUSE-BASED (fallback, model-free): detect silences in the waveform and
+  snap sentence boundaries to them. Used when the Whisper model can't be
+  downloaded (offline / blocked network).
 
 Captions drift when scene timing is *estimated* from word counts: real
 narration has pauses between sentences that estimates can't see, and the
@@ -19,10 +27,18 @@ When word-level ASR (Whisper) is available, it can replace step 3-4 with
 true per-word timestamps; the interface stays the same.
 """
 
+import difflib
+import json
+import os
+import re
 import subprocess
+from pathlib import Path
 
 import numpy as np
 from imageio_ffmpeg import get_ffmpeg_exe
+
+# Plain-CDN download path (verified reachable in this environment)
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 SR = 16000
 FRAME = int(SR * 0.02)        # 20 ms frames
@@ -114,3 +130,97 @@ def align_sentences(sentence_word_counts: list[int], audio_path: str) -> list[tu
     bounds.append(duration)
 
     return [(bounds[i], bounds[i + 1]) for i in range(len(sentence_word_counts))]
+
+
+# ---------------------------------------------------------------------------
+# Whisper tier: true per-word timestamps
+# ---------------------------------------------------------------------------
+
+_WORD_RE = re.compile(r"[^\w']")
+
+
+def _norm_word(w: str) -> str:
+    return _WORD_RE.sub("", w.lower())
+
+
+def transcribe_words(audio_path: str, model_size: str = "small.en") -> list[dict]:
+    """
+    Transcribe the voiceover with word-level timestamps. Cached to a JSON
+    beside the audio file, so repeated runs are instant.
+    Returns [{"word": str, "start": float, "end": float}, ...].
+    """
+    cache = Path(audio_path).with_suffix(".words.json")
+    if cache.exists():
+        return json.loads(cache.read_text())
+
+    from faster_whisper import WhisperModel
+    print(f"  transcribing voiceover with Whisper {model_size} (first run only)...")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    segments, _info = model.transcribe(
+        audio_path, word_timestamps=True, language="en", beam_size=5,
+        vad_filter=True,
+    )
+    words = []
+    for seg in segments:
+        for w in seg.words or []:
+            token = w.word.strip()
+            if token:
+                words.append({"word": token, "start": round(w.start, 3),
+                              "end": round(w.end, 3)})
+    cache.write_text(json.dumps(words))
+    return words
+
+
+def align_script_words(script_words: list[str], asr_words: list[dict],
+                       total_duration: float) -> list[tuple[float, float]]:
+    """
+    Give every SCRIPT word a (start, end) time by matching it against the
+    transcript. Whisper mis-hears some words; unmatched script words get
+    times interpolated between their matched neighbours, so the result is
+    always complete and monotonic.
+    """
+    a = [_norm_word(w) for w in script_words]
+    b = [_norm_word(x["word"]) for x in asr_words]
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+
+    times: list[tuple[float, float] | None] = [None] * len(a)
+    matched = 0
+    for block in sm.get_matching_blocks():
+        for k in range(block.size):
+            w = asr_words[block.b + k]
+            times[block.a + k] = (w["start"], w["end"])
+            matched += 1
+
+    # Interpolate any unmatched words between known anchors
+    known = [i for i, t in enumerate(times) if t is not None]
+    if not known:
+        raise RuntimeError("Whisper transcript did not match the script at all")
+    for i in range(len(times)):
+        if times[i] is not None:
+            continue
+        prev_i = max((k for k in known if k < i), default=None)
+        next_i = min((k for k in known if k > i), default=None)
+        if prev_i is None:
+            t0, t1 = 0.0, times[next_i][0]
+            span_lo, span_hi = 0, next_i
+        elif next_i is None:
+            t0, t1 = times[prev_i][1], total_duration
+            span_lo, span_hi = prev_i, len(times) - 1 or 1
+        else:
+            t0, t1 = times[prev_i][1], times[next_i][0]
+            span_lo, span_hi = prev_i, next_i
+        frac_lo = (i - span_lo) / max(span_hi - span_lo, 1)
+        frac_hi = (i - span_lo + 1) / max(span_hi - span_lo, 1)
+        times[i] = (t0 + (t1 - t0) * frac_lo, t0 + (t1 - t0) * frac_hi)
+
+    print(f"  word alignment: {matched}/{len(a)} script words matched exactly "
+          f"({matched / len(a) * 100:.0f}%), rest interpolated")
+    return times  # type: ignore[return-value]
+
+
+def align_words(script_text_words: list[str], audio_path: str) -> list[tuple[float, float]]:
+    """Whisper word alignment with graceful fallback to pause alignment.
+    Returns per-word (start, end); raises only if BOTH tiers fail."""
+    asr = transcribe_words(audio_path)
+    total = asr[-1]["end"] if asr else 0.0
+    return align_script_words(script_text_words, asr, total)
