@@ -106,10 +106,18 @@ def add_caption(clip: VideoClip, text: str, keywords: list[str] = ()) -> VideoCl
 # Per-scene render + fast final assembly
 # ---------------------------------------------------------------------------
 
-def render_scene_file(clip: VideoClip, path: Path) -> Path:
+# Teal-orange cinematic grade + vignette, done as ffmpeg C filters instead
+# of per-frame numpy — roughly 350ms/frame -> ~free. Approximates effects.apply_grade.
+_GRADE_VF = ("colorbalance=rs=-0.05:gs=0.02:bs=0.06:rh=0.07:gh=0.03:bh=-0.05,"
+             "eq=contrast=1.12:saturation=1.15,vignette=angle=PI/5")
+
+
+def render_scene_file(clip: VideoClip, path: Path, grade: bool = False) -> Path:
     """
-    Encode one finished scene (trimmed, captioned, transitioned) to disk
-    with the uniform settings that make lossless final concat possible.
+    Encode one finished scene to disk with the uniform settings that make
+    lossless final concat possible. When `grade` is set, the cinematic
+    grade + vignette are applied here as fast ffmpeg filters (a second,
+    quick encode) instead of slow per-frame numpy in the moviepy pipeline.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     clip.write_videofile(
@@ -122,6 +130,15 @@ def render_scene_file(clip: VideoClip, path: Path) -> Path:
         ffmpeg_params=_SCENE_ENCODE_ARGS,
         logger=None,  # silence per-frame progress bars (hundreds of renders)
     )
+    if grade:
+        graded = path.with_name(path.stem + ".graded.mp4")
+        cmd = [get_ffmpeg_exe(), "-y", "-i", str(path), "-vf", _GRADE_VF,
+               "-c:v", "libx264", "-preset", "veryfast", *_SCENE_ENCODE_ARGS,
+               "-an", "-loglevel", "error", str(graded)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            graded.replace(path)
+        # if grading fails, keep the ungraded scene rather than crash the run
     return path
 
 

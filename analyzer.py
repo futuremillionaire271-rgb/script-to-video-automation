@@ -30,8 +30,6 @@ from collections import Counter
 # ---------------------------------------------------------------------------
 CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     # (pattern, visual phrase, anchor word)
-    (r"magnesium|glycine|tryptophan|serotonin|melatonin|apigenin|compound|flavonoid",
-     "natural supplement pills herbs on table", "natural"),
     # -- sleep & night
     (r"sleep apnea|breathing (repeatedly )?stops|pauses in breathing",
      "man sleeping with cpap mask sleep apnea", "sleep"),
@@ -62,6 +60,10 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     (r"salt\b|salty", "salt shaker pouring close up", "salt"),
     (r"\bwater\b", "fresh drinking water glass", "water"),
     (r"\bdrink(s|ing)?\b", "different drinks in glasses on table", "drinks"),
+    (r"tart cherry|cherry juice|montmorency|cherries", "tart cherry juice pouring glass", "cherry"),
+    (r"nutmeg", "grating nutmeg spice close up", "nutmeg"),
+    (r"pumpkin seeds|almonds|spinach|pumpkin", "pumpkin seeds nuts healthy bowl", "seeds"),
+    (r"magnesium mocktail|warm magnesium|mocktail", "warm drink glass evening cozy", "drink"),
     (r"chamomile", "chamomile tea flowers cup", "chamomile"),
     (r"kiwi", "kiwi fruit sliced close up", "kiwi"),
     (r"smoothie|blend(ed|er)?", "making fruit smoothie blender", "smoothie"),
@@ -69,6 +71,8 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     (r"honey", "honey dripping spoon", "honey"),
     (r"lemon", "squeezing lemon into cup", "lemon"),
     (r"warm milk|almond milk|\bmilk\b", "pouring milk into glass", "milk"),
+    (r"magnesium|glycine|tryptophan|serotonin|melatonin|apigenin|compound|flavonoid",
+     "natural supplement pills herbs on table", "natural"),
     # -- bathroom
     (r"bathroom|urinat|toilet|bladder empt|visit the bathroom|pee\b",
      "walking to bathroom at night hallway light", "bathroom"),
@@ -107,6 +111,18 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     (r"heart rate|settles", "calm person relaxing breathing", "calm"),
     (r"comments?\b|subscribe", "person typing on phone social media", "phone"),
     (r"countdown|number (five|four|three|two|one)", "neon number countdown", "number"),
+    (r"blue.?toned light|screens?|phone, tablet|bright.*light from|television off|tablet",
+     "blue light phone screen dark room", "screen"),
+    (r"ritual|routine|same time every night|wind.down|calming routine|same spot",
+     "peaceful bedtime routine warm lamp", "routine"),
+    (r"white noise|special pillows|earlier bedtimes", "cozy bedroom pillows evening", "bedroom"),
+    (r"share it|friend or family|right person|loved one", "senior couple talking happily home", "couple"),
+    (r"grocery store|prescription|pharmacy|specialist", "pharmacy shelves supplements store", "pharmacy"),
+    (r"amino acid|protein", "molecular structure 3d science animation", "molecule"),
+    (r"skin temperature|body temperature|warmth|warm drink|heat dissipates",
+     "steam rising from warm mug", "warm"),
+    (r"calcium", "glass of milk calcium close up", "calcium"),
+    (r"bedtime story|as a child|grandmother", "grandmother with child cozy home", "family"),
     # -- time of day
     (r"first hour of the morning|after waking|wake up in the morning|start the morning",
      "man waking up morning stretching bed", "morning"),
@@ -353,3 +369,46 @@ def queries_report(scenes) -> str:
     for i, s in enumerate(scenes, 1):
         lines.append(f"{i:3d} | {s.text[:58]:58s} -> {s.keywords[0]}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Typewriter key-term picker: the single word/term to "type" on screen
+# ---------------------------------------------------------------------------
+# High-value terms worth flashing as a typed keyword (domain-agnostic set
+# grows as domains are added). These are the words a viewer should remember.
+KEY_TERMS = [
+    "melatonin", "magnesium", "tryptophan", "serotonin", "glycine",
+    "calcium", "apigenin", "anthocyanins", "chamomile", "nutmeg", "kiwi",
+    "montmorency", "potassium", "vitamin", "inflammation", "insomnia",
+    "vasopressin", "polyuria", "gaba", "cortisol", "dopamine", "flavonoid",
+    "citrate", "glycinate", "warfarin", "apnea", "prostate", "bladder",
+    "kidney", "hormone", "nervous", "receptors", "deficiency", "placebo",
+    "nasa", "apollo", "astronaut", "vasopressin", "capcom",
+]
+_CAP_STOP = {"the", "this", "that", "these", "those", "then", "there", "your",
+             "you", "when", "if", "for", "do", "now", "start", "after", "and",
+             "but", "it", "in", "a", "an", "number", "first", "second", "third",
+             "fourth", "fifth", "one", "two", "three", "four", "five", "so",
+             "here", "have", "what", "why", "how", "his", "her", "he", "she"}
+
+
+def pick_term(text: str) -> str | None:
+    """
+    Choose the on-screen typed keyword for a scene: a memorable technical
+    term if present, else a distinctive proper noun, else None (skip — not
+    every scene needs one).
+    """
+    words = text.split()
+    low = text.lower()
+    # 1) known high-value term
+    for term in KEY_TERMS:
+        if re.search(rf"\b{re.escape(term)}", low):
+            # return the term as it appears (title-ish), uppercased later
+            return term
+    # 2) distinctive proper noun (capitalized, mid-sentence, not a stopword)
+    for i, tok in enumerate(words):
+        w = re.sub(r"[^A-Za-z]", "", tok)
+        if (w and w[0].isupper() and i > 0 and w.lower() not in _CAP_STOP
+                and len(w) >= 4 and not words[i - 1].endswith((".", "!", "?"))):
+            return w
+    return None

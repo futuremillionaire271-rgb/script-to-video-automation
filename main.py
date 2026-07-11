@@ -48,6 +48,20 @@ def build_output_path(script_path: Path) -> Path:
     return Path("output") / f"{script_path.stem}_{timestamp}.mp4"
 
 
+def _term_start(scene, term, word_times) -> float:
+    """When to begin typing the keyword: as the narrator says that word
+    (from Whisper word times), else a small default offset."""
+    if not term or not word_times:
+        return 0.4
+    words = scene.text.split()
+    tl = term.lower()
+    for w, (s, _e) in zip(words, word_times):
+        import re as _re
+        if tl in _re.sub(r"[^a-z]", "", w.lower()):
+            return max(0.2, min(s, max(scene.duration - 1.2, 0.2)))
+    return 0.4
+
+
 def _format_eta(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
@@ -85,6 +99,8 @@ def main():
                         help='Disable full-screen statement cards on power lines')
     parser.add_argument('--no-sfx', action='store_true',
                         help='Disable whoosh/impact/riser sound design')
+    parser.add_argument('--no-typing', action='store_true',
+                        help='Disable typewriter keyword overlays + key-click sfx')
     parser.add_argument('--music', type=Path, default=None, metavar='AUDIO',
                         help='Background music file — looped, ducked under narration, '
                              'faded in/out')
@@ -236,6 +252,17 @@ def _run_pipeline(args, script_path: Path):
     boundaries = plan_transitions(len(scenes)) if args.transition == 'varied' else None
     motion_plan = None if args.no_motion else plan_motion(len(scenes))
     card_flags = [False] * len(scenes) if args.no_cards else plan_cards(scenes)
+    # Typed keyword per scene (skip on statement-card scenes — they're already
+    # full-screen text). Kept ~1 per scene => a typed word every ~6-8s.
+    from analyzer import pick_term
+    if args.no_typing:
+        scene_terms = [None] * len(scenes)
+    else:
+        scene_terms = [None if card_flags[i] else pick_term(s.text)
+                       for i, s in enumerate(scenes)]
+        n_terms = sum(1 for t in scene_terms if t)
+        print(f"Typed keywords on {n_terms} scenes (e.g. "
+              f"{[t.upper() for t in scene_terms if t][:5]})")
     if any(card_flags):
         idxs = [i + 1 for i, f in enumerate(card_flags) if f]
         print(f"Statement cards on scenes: {idxs}")
@@ -245,7 +272,7 @@ def _run_pipeline(args, script_path: Path):
     keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
                 f"motion={not args.no_motion}|grade={not args.no_grade}|"
-                f"callout={not args.no_callout}|cards={not args.no_cards}|v6-retention|"
+                f"callout={not args.no_callout}|cards={not args.no_cards}|typing={not args.no_typing}|v7-typed|"
                 f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)
@@ -332,6 +359,9 @@ def _run_pipeline(args, script_path: Path):
             "grade": not args.no_grade,
             "callout": not args.no_callout,
             "card": card_flags[i],
+            "term": scene_terms[i],
+            "term_start": _term_start(scenes[i], scene_terms[i],
+                                      scene_word_times[i] if scene_word_times else None),
             "word_times": scene_word_times[i] if scene_word_times else None,
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),
@@ -429,7 +459,14 @@ def _run_pipeline(args, script_path: Path):
     sfx_track = None
     if not args.no_sfx:
         from sfx import build_sfx_track, plan_sfx_events
+        from kw_type import type_schedule
         events = plan_sfx_events(scenes, boundaries, card_flags)
+        for i, term in enumerate(scene_terms):
+            if term:
+                base = scenes[i].start_time + _term_start(
+                    scenes[i], term, scene_word_times[i] if scene_word_times else None)
+                for ct in type_schedule(term, base):
+                    events.append(("key", ct))
         sfx_track = build_sfx_track(events, total_duration,
                                     Path("output") / ".sfx_track.wav")
         if sfx_track is not None:

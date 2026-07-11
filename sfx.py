@@ -21,7 +21,8 @@ import numpy as np
 SR = 44100
 # Mix levels relative to the voiceover. Peaks sit just under speech peaks
 # (~-7 dBFS): clearly FELT at boundaries without masking a single word.
-GAIN = {"whoosh": 0.30, "whoosh_soft": 0.18, "impact": 0.45, "riser": 0.25, "card": 0.45}
+GAIN = {"whoosh": 0.30, "whoosh_soft": 0.18, "impact": 0.45, "riser": 0.25,
+        "card": 0.45, "key": 0.32}
 MIN_GAP = 1.2  # never stack effects closer than this (seconds)
 
 
@@ -60,6 +61,17 @@ def _riser(dur=0.9) -> np.ndarray:
     return x / (np.abs(x).max() + 1e-9)
 
 
+def _key_click(dur=0.055) -> np.ndarray:
+    """A single mechanical keyboard keypress: a sharp click + tiny body thock."""
+    n = int(SR * dur)
+    t = np.linspace(0, dur, n)
+    rng = np.random.RandomState(19)
+    click = rng.randn(n) * np.exp(-t * 380)                 # crisp attack
+    thock = np.sin(2 * np.pi * 130 * t) * np.exp(-t * 90) * 0.5  # low body
+    x = _lowpass(click, 3) + thock
+    return x / (np.abs(x).max() + 1e-9)
+
+
 def _card_hit(riser_dur=0.9, impact_dur=0.7) -> np.ndarray:
     """Riser building into an impact — the statement-card landing."""
     r = _riser(riser_dur) * (GAIN["riser"] / GAIN["card"])
@@ -69,7 +81,7 @@ def _card_hit(riser_dur=0.9, impact_dur=0.7) -> np.ndarray:
 
 
 _BANK = {"whoosh": _whoosh, "whoosh_soft": _whoosh, "impact": _impact,
-         "riser": _riser, "card": _card_hit}
+         "riser": _riser, "card": _card_hit, "key": _key_click}
 
 
 def build_sfx_track(events: list[tuple[str, float]], duration: float,
@@ -86,7 +98,9 @@ def build_sfx_track(events: list[tuple[str, float]], duration: float,
 
     last_t = -1e9
     for kind, t in sorted(events, key=lambda e: e[1]):
-        if kind not in _BANK or t - last_t < MIN_GAP:
+        if kind not in _BANK:
+            continue
+        if kind != "key" and t - last_t < MIN_GAP:
             continue
         x = _BANK[kind]() * GAIN[kind]
         if kind == "riser":
@@ -99,7 +113,8 @@ def build_sfx_track(events: list[tuple[str, float]], duration: float,
         i1 = min(total, i0 + len(x))
         if i1 > i0:
             track[i0:i1] += x[: i1 - i0]
-            last_t = t
+            if kind != "key":
+                last_t = t
 
     track = np.clip(track, -0.9, 0.9)
     out_path.parent.mkdir(parents=True, exist_ok=True)

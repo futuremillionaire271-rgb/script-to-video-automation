@@ -15,8 +15,8 @@ from callouts import add_callout
 from captions import burn_captions
 from clip_finder import ClipCandidate, download_clip, _fit_to_frame, make_placeholder_clip
 from editor import render_scene_file
-from effects import (SUBSHOT_OVERLAP, add_vignette, apply_edges, apply_grade,
-                     apply_motion, punch_in)
+from effects import SUBSHOT_OVERLAP, apply_edges, apply_motion, punch_in
+from kw_type import add_typed_keyword
 from scene_parser import Scene
 
 
@@ -78,16 +78,17 @@ def render_scene_job(job: dict) -> int:
     elif job["motion"]:
         clip = apply_motion(clip, job["motion"])
 
-    if job["grade"]:
-        clip = add_vignette(apply_grade(clip))
-
+    # (grade + vignette are now applied as fast ffmpeg filters in
+    # render_scene_file, not slow per-frame numpy here)
     clip = burn_captions(clip, scene.text, scene.keywords,
                          word_times=job.get("word_times"))
     if job.get("callout", True):
         clip = add_callout(clip, scene.text)
+    if job.get("term"):
+        clip = add_typed_keyword(clip, job["term"], job.get("term_start", 0.4))
     clip = apply_edges(clip, in_style, job["out_style"])
 
-    render_scene_file(clip, Path(job["scene_file"]))
+    render_scene_file(clip, Path(job["scene_file"]), grade=job["grade"])
     clip.close()
     for c in sources:
         c.close()
