@@ -33,6 +33,17 @@ def render_scene_job(job: dict) -> int:
     raw_paths: list[Path] = []
     sources = []
 
+    if job.get("card"):
+        # Statement card: the line itself owns the screen. No stock clip,
+        # no caption (the card IS the text), no callout.
+        from elements import make_statement_card
+        clip = make_statement_card(scene.text, scene.keywords, scene.duration,
+                                   (1920, 1080))
+        clip = apply_edges(clip, "cut", job["out_style"])
+        render_scene_file(clip, Path(job["scene_file"]))
+        clip.close()
+        return job["index"]
+
     if job["shots"] is None:
         clip = make_placeholder_clip(scene, job["index"])
     else:

@@ -162,45 +162,55 @@ def concat_scene_files(scene_files: list[Path], output_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def mux_audio(video_path: Path, duration: float,
-              music: Path = None, voiceover: Path = None,
+              music: Path = None, voiceover: Path = None, sfx: Path = None,
               music_volume: float = MUSIC_VOLUME) -> Path:
     """
     Add audio to the assembled video without re-encoding the video stream.
 
     - voiceover plays at full volume (the star of the mix)
     - music is looped to cover the video, ducked to `music_volume`, with a
-      fade-in and a fade-out at the end, so it supports the narration
-      instead of fighting it
+      fade-in and a fade-out at the end
+    - sfx is the synthesized sound-design track (whooshes/impacts/risers),
+      pre-levelled, mixed as-is
     """
-    if music is None and voiceover is None:
+    if music is None and voiceover is None and sfx is None:
         return video_path
 
     tmp_out = video_path.with_name(video_path.stem + ".audio.mp4")
     cmd = [get_ffmpeg_exe(), "-y", "-i", str(video_path)]
 
-    music_idx = voice_idx = None
+    music_idx = voice_idx = sfx_idx = None
     next_idx = 1
     if music is not None:
         cmd += ["-stream_loop", "-1", "-i", str(music)]
         music_idx, next_idx = next_idx, next_idx + 1
     if voiceover is not None:
         cmd += ["-i", str(voiceover)]
-        voice_idx = next_idx
+        voice_idx, next_idx = next_idx, next_idx + 1
+    if sfx is not None:
+        cmd += ["-i", str(sfx)]
+        sfx_idx = next_idx
 
     filters = []
+    mix_inputs = []
     if music_idx is not None:
         fade_out_start = max(0.0, duration - 2.5)
         filters.append(
             f"[{music_idx}:a]volume={music_volume},"
             f"afade=t=in:st=0:d=1.5,afade=t=out:st={fade_out_start:.2f}:d=2.5[bg]"
         )
-    if voice_idx is not None and music_idx is not None:
-        filters.append(f"[{voice_idx}:a][bg]amix=inputs=2:duration=longest:normalize=0[mix]")
+        mix_inputs.append("[bg]")
+    if voice_idx is not None:
+        mix_inputs.insert(0, f"[{voice_idx}:a]")
+    if sfx_idx is not None:
+        mix_inputs.append(f"[{sfx_idx}:a]")
+
+    if len(mix_inputs) > 1:
+        filters.append("".join(mix_inputs)
+                       + f"amix=inputs={len(mix_inputs)}:duration=longest:normalize=0[mix]")
         audio_label = "[mix]"
-    elif voice_idx is not None:
-        audio_label = f"{voice_idx}:a"
     else:
-        audio_label = "[bg]"
+        audio_label = mix_inputs[0].strip("[]") if ":" in mix_inputs[0] else mix_inputs[0]
 
     if filters:
         cmd += ["-filter_complex", ";".join(filters)]

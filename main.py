@@ -81,6 +81,10 @@ def main():
                         help='Disable on-screen entity callouts (place/person/number tags)')
     parser.add_argument('--no-vision', action='store_true',
                         help='Skip CLIP visual verification of stock candidates')
+    parser.add_argument('--no-cards', action='store_true',
+                        help='Disable full-screen statement cards on power lines')
+    parser.add_argument('--no-sfx', action='store_true',
+                        help='Disable whoosh/impact/riser sound design')
     parser.add_argument('--music', type=Path, default=None, metavar='AUDIO',
                         help='Background music file — looped, ducked under narration, '
                              'faded in/out')
@@ -218,15 +222,20 @@ def _run_pipeline(args, script_path: Path):
     # Documentary treatment plans (deterministic — resume-safe)
     from effects import (SUBSHOT_OVERLAP, plan_transitions, plan_motion,
                          scene_edge_styles)
+    from elements import plan_cards
     boundaries = plan_transitions(len(scenes)) if args.transition == 'varied' else None
     motion_plan = None if args.no_motion else plan_motion(len(scenes))
+    card_flags = [False] * len(scenes) if args.no_cards else plan_cards(scenes)
+    if any(card_flags):
+        idxs = [i + 1 for i, f in enumerate(card_flags) if f]
+        print(f"Statement cards on scenes: {idxs}")
 
     # Keywords are part of the run identity: editing the shot list must
     # invalidate old rendered scenes so they re-render with new footage.
     keywords_sig = "|".join(",".join(s.keywords) for s in scenes)
     settings = (f"{args.scene_duration}|{pace:.3f}|{args.max_shot}|{args.transition}|"
                 f"motion={not args.no_motion}|grade={not args.no_grade}|"
-                f"callout={not args.no_callout}|v5-whisper|"
+                f"callout={not args.no_callout}|cards={not args.no_cards}|v6-retention|"
                 f"kw={hashlib.sha256(keywords_sig.encode()).hexdigest()[:12]}")
     run_id = fingerprint(script, len(scenes), settings)
     checkpoint = Checkpoint(TEMP_DIR / "progress.json", run_id)
@@ -280,7 +289,7 @@ def _run_pipeline(args, script_path: Path):
             out_style = "black"
 
         shots = None
-        if not args.demo:
+        if not args.demo and not card_flags[i]:
             if args.max_shot > 0:
                 n_shots = min(MAX_SHOTS_PER_SCENE,
                               max(1, math.ceil(scene.duration / args.max_shot)))
@@ -312,6 +321,7 @@ def _run_pipeline(args, script_path: Path):
                        else None),
             "grade": not args.no_grade,
             "callout": not args.no_callout,
+            "card": card_flags[i],
             "word_times": scene_word_times[i] if scene_word_times else None,
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),
@@ -369,10 +379,21 @@ def _run_pipeline(args, script_path: Path):
     concat_scene_files(scene_files, output_path)
 
     total_duration = sum(s.duration for s in scenes)
-    if args.music or args.voiceover:
-        print("Muxing audio (voiceover full volume, music ducked underneath)...")
+    sfx_track = None
+    if not args.no_sfx:
+        from sfx import build_sfx_track, plan_sfx_events
+        events = plan_sfx_events(scenes, boundaries, card_flags)
+        sfx_track = build_sfx_track(events, total_duration,
+                                    Path("output") / ".sfx_track.wav")
+        if sfx_track is not None:
+            print(f"Sound design: {len(events)} audio accents "
+                  f"(whooshes/impacts/risers) placed at scene boundaries")
+    if args.music or args.voiceover or sfx_track:
+        print("Muxing audio (voiceover full volume, music ducked, sfx accents)...")
         mux_audio(output_path, total_duration,
-                  music=args.music, voiceover=args.voiceover)
+                  music=args.music, voiceover=args.voiceover, sfx=sfx_track)
+        if sfx_track is not None:
+            sfx_track.unlink(missing_ok=True)
 
     # Clean up scene clips + checkpoint after a successful export
     if not args.keep_temp and TEMP_DIR.exists():
