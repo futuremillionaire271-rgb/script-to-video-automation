@@ -19,8 +19,9 @@ from pathlib import Path
 import numpy as np
 
 SR = 44100
-# Mix levels relative to the voiceover (kept low — punctuation, not noise)
-GAIN = {"whoosh": 0.16, "whoosh_soft": 0.10, "impact": 0.22, "riser": 0.13}
+# Mix levels relative to the voiceover. Peaks sit just under speech peaks
+# (~-7 dBFS): clearly FELT at boundaries without masking a single word.
+GAIN = {"whoosh": 0.30, "whoosh_soft": 0.18, "impact": 0.45, "riser": 0.25, "card": 0.45}
 MIN_GAP = 1.2  # never stack effects closer than this (seconds)
 
 
@@ -59,7 +60,16 @@ def _riser(dur=0.9) -> np.ndarray:
     return x / (np.abs(x).max() + 1e-9)
 
 
-_BANK = {"whoosh": _whoosh, "whoosh_soft": _whoosh, "impact": _impact, "riser": _riser}
+def _card_hit(riser_dur=0.9, impact_dur=0.7) -> np.ndarray:
+    """Riser building into an impact — the statement-card landing."""
+    r = _riser(riser_dur) * (GAIN["riser"] / GAIN["card"])
+    i = _impact(impact_dur) * (GAIN["impact"] / GAIN["card"])
+    x = np.concatenate([r, i])
+    return x / (np.abs(x).max() + 1e-9)
+
+
+_BANK = {"whoosh": _whoosh, "whoosh_soft": _whoosh, "impact": _impact,
+         "riser": _riser, "card": _card_hit}
 
 
 def build_sfx_track(events: list[tuple[str, float]], duration: float,
@@ -79,7 +89,12 @@ def build_sfx_track(events: list[tuple[str, float]], duration: float,
         if kind not in _BANK or t - last_t < MIN_GAP:
             continue
         x = _BANK[kind]() * GAIN[kind]
-        start_t = t - len(x) / SR if kind == "riser" else t - 0.06
+        if kind == "riser":
+            start_t = t - len(x) / SR
+        elif kind == "card":
+            start_t = t - 0.9  # riser portion leads in; impact lands at t
+        else:
+            start_t = t - 0.06
         i0 = max(0, int(start_t * SR))
         i1 = min(total, i0 + len(x))
         if i1 > i0:
@@ -105,8 +120,7 @@ def plan_sfx_events(scenes, boundaries, card_flags) -> list[tuple[str, float]]:
         t = scenes[i + 1].start_time
         style = boundaries[i] if boundaries and i < len(boundaries) else "cut"
         if card_flags[i + 1]:
-            events.append(("riser", t))
-            events.append(("impact", t + 0.02))
+            events.append(("card", t))
         elif style in ("punch", "zoompunch"):
             events.append(("impact", t))
         elif style == "white":
