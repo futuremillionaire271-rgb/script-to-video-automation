@@ -99,6 +99,10 @@ def main():
                              'and exit — hand-edit keywords, then re-run with --use-plan')
     parser.add_argument('--use-plan', type=Path, default=None, metavar='JSON',
                         help='Override scene keywords from an edited plan file')
+    parser.add_argument('--audit', action='store_true',
+                        help='Select clips for every scene and save each pick\'s '
+                             'thumbnail + a match report to output/audit/ WITHOUT '
+                             'rendering — verify picks by eye first')
     parser.add_argument('--limit', type=int, default=None, metavar='N',
                         help='Render only the first N scenes — for a quick style proof '
                              'before committing to a long full render')
@@ -326,6 +330,43 @@ def _run_pipeline(args, script_path: Path):
             "raw_dir": str(raw_dir),
             "scene_file": str(scenes_dir / f"scene_{i + 1:04d}.mp4"),
         }
+
+    if args.audit:
+        import requests as _rq
+        audit_dir = Path("output/audit")
+        if audit_dir.exists():
+            shutil.rmtree(audit_dir)
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        report = []
+        for i in range(len(scenes)):
+            job = make_job(i)
+            if job.get("card") or not job.get("shots"):
+                continue
+            for n, shot in enumerate(job["shots"]):
+                c = shot["candidate"]
+                entry = {"scene": i + 1, "shot": n + 1,
+                         "text": scenes[i].text[:90],
+                         "query": c["query"], "clip": f"{c['source']}:{c['video_id']}",
+                         "sim": round(c["sim"], 3), "desc": c["desc"][:100]}
+                report.append(entry)
+                if c.get("thumb"):
+                    try:
+                        img = _rq.get(c["thumb"], timeout=15).content
+                        (audit_dir / f"scene_{i+1:04d}_{n+1}_sim{c['sim']:.2f}.jpg"
+                         ).write_bytes(img)
+                    except Exception:
+                        pass
+        (audit_dir / "picks_report.json").write_text(json.dumps(report, indent=2))
+        strong = sum(1 for r in report if r["sim"] >= 0.24)
+        ok = sum(1 for r in report if 0.19 <= r["sim"] < 0.24)
+        weak = sum(1 for r in report if r["sim"] < 0.19)
+        print(f"\nAUDIT: {len(report)} picks | strong(>=0.24): {strong} | "
+              f"ok(0.19-0.24): {ok} | weak(<0.19): {weak}")
+        for r in report:
+            if r["sim"] < 0.19:
+                print(f"  WEAK scene {r['scene']}: sim={r['sim']} q='{r['query']}' -> {r['desc'][:60]}")
+        print(f"Thumbnails + picks_report.json in {audit_dir}/")
+        return
 
     from scene_builder import render_scene_job
 

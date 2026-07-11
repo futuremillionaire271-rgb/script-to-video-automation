@@ -33,8 +33,9 @@ load_dotenv(override=True)
 VIDEO_SIZE = (1920, 1080)
 REQUEST_TIMEOUT = 20
 RESULTS_PER_QUERY = 50  # more results per request = fewer requests + more variety
-VISION_TOP_K = 6            # text-ranked candidates that get a CLIP look
-VISION_REJECT_SIM = 0.16    # below this, the thumbnail clearly isn't the query
+VISION_TOP_K = 20           # candidates per query that get a CLIP look
+VISION_ACCEPT = 0.24        # strong visual match: take it and stop searching
+VISION_MIN = 0.19           # after all queries, never pick below this silently
 
 # Throttles sized just under the documented provider limits
 _PEXELS_LIMITER = RateLimiter("pexels", 190, 3600)      # limit: 200/hour
@@ -57,6 +58,9 @@ class ClipCandidate:
     height: int
     duration: float      # source video duration in seconds
     query: str
+    sim: float = -1.0    # CLIP visual match score (-1 = not scored)
+    desc: str = ""       # slug/tags (human-readable identity)
+    thumb: str = ""      # first thumbnail (for audit)
 
     @property
     def key(self) -> str:
@@ -144,9 +148,21 @@ def _pexels_request(query: str) -> list[dict]:
             # Pexels page URL carries a descriptive slug, e.g.
             # ".../video/a-woman-drinking-water-12345/" -> relevance signal
             "desc": video.get("url", ""),
-            "thumb": video.get("image", ""),
+            "thumbs": _pexels_thumbs(video),
         })
     return results
+
+
+def _pexels_thumbs(video: dict) -> list[str]:
+    """Up to 3 frames spread across the video — one frame can lie."""
+    thumbs = [video.get("image", "")]
+    pics = video.get("video_pictures", [])
+    if pics:
+        for idx in {len(pics) // 2, len(pics) - 1}:
+            url = pics[idx].get("picture", "")
+            if url:
+                thumbs.append(url)
+    return [t for t in thumbs if t][:3]
 
 
 def _pick_pexels_file(video_files: list[dict]) -> dict | None:
@@ -193,7 +209,7 @@ def _pixabay_request(query: str) -> list[dict]:
             "duration": float(hit.get("duration", 0)),
             # Pixabay provides comma-separated tags -> relevance signal
             "desc": hit.get("tags", ""),
-            "thumb": file.get("thumbnail", ""),
+            "thumbs": [file.get("thumbnail", "")],
         })
     return results
 
@@ -266,19 +282,14 @@ def _relevance(query: str, desc: str) -> float:
 def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
                         use_vision: bool = True) -> ClipCandidate | None:
     """
-    Find the best stock clip for a scene.
+    Find the best stock clip for a scene — VISION-GATED.
 
-    - Alternates which provider is tried first (even scenes: Pexels,
-      odd scenes: Pixabay) to spread rate-limit load.
-    - Queries broaden progressively: all keywords -> first two -> first one.
-    - Prefers clips not yet used this run; if every candidate is already
-      used (long runs on narrow topics), reuses the best one rather than
-      failing — flagged in the log.
-    - Raises ClipSearchError if every search attempt errored.
+    Text metadata only pre-filters; CLIP looks at every surviving
+    candidate's actual frames and the highest visual match wins. A strong
+    match (>= VISION_ACCEPT) is taken immediately; otherwise every query is
+    tried and the best seen wins if it clears VISION_MIN. Anything weaker
+    is a loudly-logged last resort, never a silent pick.
     """
-    # Keywords containing spaces are treated as full natural-language
-    # queries (from a hand-authored shot list) and tried in order; bare
-    # keyword triples fall back to the old broadening ladder.
     if any(" " in kw for kw in scene.keywords):
         queries = list(dict.fromkeys(kw for kw in scene.keywords if kw))
     else:
@@ -291,14 +302,19 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
         return None
 
     providers = ("pexels", "pixabay") if index % 2 == 0 else ("pixabay", "pexels")
+    vision_on = use_vision
+    if vision_on:
+        import vision
+        vision_on = vision.available()
 
     errors: list[str] = []
     attempts = 0
+    best_global: ClipCandidate | None = None
     best_used, best_used_score = None, float("-inf")
     best_weak, best_weak_score = None, float("-inf")
 
-    for provider in providers:
-        for query in queries:
+    for query in queries:
+        for provider in providers:
             attempts += 1
             try:
                 results = _search(provider, query)
@@ -307,52 +323,60 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
                 continue
 
             floor = _relevance_floor(query)
-            passing: list[tuple[float, ClipCandidate, str]] = []
+            passing = []
             for r in results:
                 rel = _relevance(query, r.get("desc", ""))
                 score = (_score(r["width"], r["height"], r["duration"], scene.duration)
                          + rel)
+                thumbs = tuple(r.get("thumbs") or ([r["thumb"]] if r.get("thumb") else []))
                 candidate = ClipCandidate(
                     source=r["source"], video_id=r["id"], download_url=r["url"],
                     width=r["width"], height=r["height"], duration=r["duration"],
-                    query=query,
+                    query=query, desc=r.get("desc", ""),
+                    thumb=thumbs[0] if thumbs else "",
                 )
                 if candidate.key in used_ids:
                     if rel >= floor and score > best_used_score:
                         best_used, best_used_score = candidate, score
                 elif rel < floor:
-                    # HARD FLOOR: description shares nothing with the query
-                    # (or is a person/animal mismatch). Keep only as a very
-                    # last resort, never as a normal pick.
                     if score > best_weak_score:
                         best_weak, best_weak_score = candidate, score
                 else:
-                    passing.append((score, candidate, r.get("thumb", "")))
+                    passing.append((score, candidate, thumbs))
 
-            if passing:
-                passing.sort(key=lambda t: t[0], reverse=True)
-                top = passing[:VISION_TOP_K]
-                if use_vision:
-                    import vision
-                    sims = vision.score_candidates(query, [t[2] for t in top])
-                    ranked = sorted(
-                        ((s + vision.vision_bonus(sim), cand, sim)
-                         for (s, cand, _), sim in zip(top, sims)),
-                        key=lambda t: t[0], reverse=True,
-                    )
-                    combined, best, sim = ranked[0]
-                    if sim is not None and sim < VISION_REJECT_SIM:
-                        # The best candidate's actual PICTURE doesn't match
-                        # the words — treat the whole query as a miss and
-                        # try the next query/provider.
-                        if combined > best_weak_score:
-                            best_weak, best_weak_score = best, combined
+            if not passing:
+                continue
+            passing.sort(key=lambda t: t[0], reverse=True)
+            top = passing[:VISION_TOP_K]
+
+            if vision_on:
+                import vision
+                sims = vision.score_candidates(query, [t[2] for t in top])
+                for (score, cand, _), sim in zip(top, sims):
+                    if sim is None:
                         continue
-                else:
-                    best = top[0][1]
+                    cand.sim = sim
+                    if best_global is None or sim > best_global.sim:
+                        best_global = cand
+                # Strong visual match for THIS query -> done
+                if best_global is not None and best_global.sim >= VISION_ACCEPT \
+                        and best_global.query == query:
+                    used_ids.add(best_global.key)
+                    return best_global
+            else:
+                # No vision available: best text-ranked candidate wins
+                best = top[0][1]
                 used_ids.add(best.key)
                 return best
 
+    if best_global is not None and best_global.sim >= VISION_MIN:
+        used_ids.add(best_global.key)
+        return best_global
+    if best_global is not None:
+        print(f"  Scene {index + 1}: LOW VISUAL MATCH (sim={best_global.sim:.2f}) "
+              f"for {queries} — best available used; consider editing this shot")
+        used_ids.add(best_global.key)
+        return best_global
     if best_used is not None:
         print(f"  Scene {index + 1}: all candidates already used — reusing "
               f"{best_used.key} for '{best_used.query}'")
@@ -364,8 +388,6 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
         return best_weak
 
     if errors and len(errors) == attempts:
-        # Every single attempt errored — this is an API/network failure,
-        # not a "no results" situation. Surface it.
         raise ClipSearchError(
             f"All {attempts} search attempts failed for keywords {scene.keywords}:\n  - "
             + "\n  - ".join(errors)
