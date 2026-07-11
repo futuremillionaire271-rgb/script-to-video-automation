@@ -195,6 +195,12 @@ def _run_pipeline(args, script_path: Path):
                                    words_per_second=pace)
     print_scenes(scenes, limit=10 if len(scenes) > 40 else None)
 
+    # The analyzer replaces raw keyword extraction with strong visual
+    # queries (concept translation + topic carry-forward + variety rotation)
+    from analyzer import generate_queries
+    generate_queries(scenes, script)
+    print("Analyzer: strong visual queries generated for every scene")
+
     # Plan workflow: export keywords for hand-editing, or apply edits
     if args.export_plan is not None:
         plan = [

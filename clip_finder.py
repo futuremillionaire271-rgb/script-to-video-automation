@@ -32,8 +32,8 @@ load_dotenv(override=True)
 
 VIDEO_SIZE = (1920, 1080)
 REQUEST_TIMEOUT = 20
-RESULTS_PER_QUERY = 50  # more results per request = fewer requests + more variety
-VISION_TOP_K = 20           # candidates per query that get a CLIP look
+RESULTS_PER_QUERY = 30  # more results per request = fewer requests + more variety
+VISION_TOP_K = 6            # strong queries mean few candidates need a look
 VISION_ACCEPT = 0.24        # strong visual match: take it and stop searching
 VISION_MIN = 0.19           # after all queries, never pick below this silently
 
