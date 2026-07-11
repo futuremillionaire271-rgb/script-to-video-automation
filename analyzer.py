@@ -30,6 +30,8 @@ from collections import Counter
 # ---------------------------------------------------------------------------
 CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     # (pattern, visual phrase, anchor word)
+    (r"magnesium|glycine|tryptophan|serotonin|melatonin|apigenin|compound|flavonoid",
+     "natural supplement pills herbs on table", "natural"),
     # -- sleep & night
     (r"sleep apnea|breathing (repeatedly )?stops|pauses in breathing",
      "man sleeping with cpap mask sleep apnea", "sleep"),
@@ -60,6 +62,13 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     (r"salt\b|salty", "salt shaker pouring close up", "salt"),
     (r"\bwater\b", "fresh drinking water glass", "water"),
     (r"\bdrink(s|ing)?\b", "different drinks in glasses on table", "drinks"),
+    (r"chamomile", "chamomile tea flowers cup", "chamomile"),
+    (r"kiwi", "kiwi fruit sliced close up", "kiwi"),
+    (r"smoothie|blend(ed|er)?", "making fruit smoothie blender", "smoothie"),
+    (r"herbal tea|tea bag|steep", "herbal tea steeping cup", "tea"),
+    (r"honey", "honey dripping spoon", "honey"),
+    (r"lemon", "squeezing lemon into cup", "lemon"),
+    (r"warm milk|almond milk|\bmilk\b", "pouring milk into glass", "milk"),
     # -- bathroom
     (r"bathroom|urinat|toilet|bladder empt|visit the bathroom|pee\b",
      "walking to bathroom at night hallway light", "bathroom"),
@@ -81,6 +90,23 @@ CONCEPT_VISUALS: list[tuple[str, str, str]] = [
     (r"mouth breathing|nasal congestion|gasp", "man sleeping mouth open breathing", "breathing"),
     (r"pain\b|anxiety|stress", "stressed man rubbing forehead", "stressed"),
     (r"exhaust|tired|sleepiness|fatigue", "tired man rubbing eyes exhausted", "tired"),
+    (r"receptors?|brain activity|nervous system|neurotransmitter",
+     "human brain neurons 3d animation", "brain"),
+    (r"clinical (research|trial)|placebo|randomized|study|studies|researchers?|sleep lab",
+     "scientist researcher laboratory microscope", "research"),
+    (r"supplement|capsule", "supplement capsules bottle", "supplement"),
+    (r"inflammation|stiff(ness)?|joints?", "senior man rubbing stiff knee joint", "joints"),
+    (r"blood sugar|spike", "blood sugar glucose meter test", "glucose"),
+    (r"blood.?thinn|warfarin", "doctor holding medication consultation", "doctor"),
+    (r"allerg|ragweed|itching", "person scratching arm allergy", "allergy"),
+    (r"vitamin|potassium|fiber|immune", "fresh fruits vitamins healthy", "vitamins"),
+    (r"staring at the ceiling|wide awake|two in the morning",
+     "man lying awake staring at ceiling night", "awake"),
+    (r"pillow|fluffed", "person fluffing pillow bed", "pillow"),
+    (r"turn(ed)? off the (lights?|lamp)", "hand turning off bedside lamp", "lamp"),
+    (r"heart rate|settles", "calm person relaxing breathing", "calm"),
+    (r"comments?\b|subscribe", "person typing on phone social media", "phone"),
+    (r"countdown|number (five|four|three|two|one)", "neon number countdown", "number"),
     # -- time of day
     (r"first hour of the morning|after waking|wake up in the morning|start the morning",
      "man waking up morning stretching bed", "morning"),
