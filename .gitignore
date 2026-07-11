@@ -58,3 +58,9 @@ my_scripts/*.mp3
 my_scripts/*.wav
 my_scripts/*.m4a
 my_scripts/*.words.json
+
+# Generated analysis artifacts
+my_scripts/*.words.json
+my_scripts/auto_plan.json
+my_scripts/*_plan*.json
+cache/vision_scores.json
