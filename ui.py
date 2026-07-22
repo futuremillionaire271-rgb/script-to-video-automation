@@ -17,8 +17,10 @@ import sys
 from pathlib import Path
 
 import uvicorn
+from clip_finder import ClipSearchError, find_candidates_for_scene
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from scene_parser import Scene
 
 ROOT = Path(__file__).parent
 UPLOADS = ROOT / "my_scripts"
@@ -27,6 +29,7 @@ TEMP = ROOT / "temp"
 PLAN = UPLOADS / "ui_plan.json"
 SCRIPT = UPLOADS / "ui_script.txt"
 VOICE = UPLOADS / "ui_voiceover.mp3"
+DEFAULT_BEAT_SECONDS = 3.0
 
 app = FastAPI(title="Script to Video Studio")
 _render_proc: subprocess.Popen | None = None
@@ -34,131 +37,423 @@ _expected_scenes: int = 0
 
 
 PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Script → Video Studio</title>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AI Editing Tool</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{--bg:#0b0e14;--panel:#12161f;--panel2:#171c27;--line:#232a38;
---text:#e8ecf3;--dim:#8b94a7;--gold:#ffd147;--gold2:#b8912b;--ok:#3ecf8e;--err:#ff6b6b}
+:root{
+  --bg:#090b10;--bg2:#0f131b;--panel:#121823;--panel2:#171e2b;--line:#273042;
+  --text:#f3f0e8;--muted:#97a4bb;--accent:#f4ba41;--accent2:#c47b22;--ok:#45d48f;--warn:#ff8a5b;
+  --shadow:0 22px 70px rgba(0,0,0,.45)
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,'Segoe UI',Roboto,sans-serif;min-height:100vh}
-.wrap{max-width:1100px;margin:0 auto;padding:32px 20px 80px}
-header{display:flex;align-items:center;gap:14px;margin-bottom:28px}
-.logo{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--gold),var(--gold2));
-display:flex;align-items:center;justify-content:center;font-size:22px}
-h1{font-size:22px;font-weight:700}h1 span{color:var(--gold)}
-.sub{color:var(--dim);font-size:13px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-@media(max-width:860px){.grid{grid-template-columns:1fr}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px}
-.card h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:14px}
-textarea{width:100%;min-height:180px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
-color:var(--text);padding:12px;font:13px/1.5 ui-monospace,monospace;resize:vertical}
-input[type=file]{color:var(--dim);font-size:13px}
-.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:12px}
-label.opt{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--dim);cursor:pointer}
-input[type=number]{width:70px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px 8px}
-button{background:linear-gradient(135deg,var(--gold),var(--gold2));color:#141414;font-weight:700;border:0;
-border-radius:10px;padding:11px 22px;font-size:14px;cursor:pointer;transition:transform .1s}
+body{
+  min-height:100vh;color:var(--text);
+  font:14px/1.5 "Segoe UI",system-ui,sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(244,186,65,.16), transparent 28%),
+    radial-gradient(circle at top right, rgba(110,95,255,.12), transparent 24%),
+    linear-gradient(180deg, #0a0d12 0%, #090b10 100%)
+}
+.wrap{max-width:1320px;margin:0 auto;padding:28px 20px 64px}
+header{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:20px;
+  margin-bottom:24px;padding:18px 22px;border:1px solid rgba(255,255,255,.08);
+  background:rgba(18,24,35,.78);backdrop-filter:blur(14px);border-radius:24px;box-shadow:var(--shadow)
+}
+.brand{display:flex;gap:16px;align-items:flex-start}
+.logo{
+  width:52px;height:52px;border-radius:16px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#121212;display:flex;align-items:center;justify-content:center;
+  font-size:24px;font-weight:800;letter-spacing:.04em
+}
+h1{
+  font:700 24px/1.1 Georgia,"Times New Roman",serif;
+  letter-spacing:.02em;margin-bottom:6px
+}
+.sub{color:var(--muted);max-width:760px}
+.hero-stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.pill,.badge{
+  display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+  border-radius:999px;padding:6px 12px;background:rgba(255,255,255,.02);font-size:12px;color:var(--muted)
+}
+.badge.live{color:var(--ok);border-color:rgba(69,212,143,.45);background:rgba(69,212,143,.08)}
+.shell{display:grid;grid-template-columns:380px minmax(0,1fr);gap:20px}
+@media(max-width:1080px){.shell{grid-template-columns:1fr}}
+.stack{display:grid;gap:20px}
+.card{
+  background:linear-gradient(180deg, rgba(18,24,35,.96), rgba(14,19,28,.96));
+  border:1px solid rgba(255,255,255,.07);border-radius:24px;padding:20px;box-shadow:var(--shadow)
+}
+.card h2{
+  font:700 12px/1 "Segoe UI",system-ui,sans-serif;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin-bottom:16px
+}
+.lead{color:var(--muted);margin-bottom:14px}
+textarea{
+  width:100%;min-height:320px;resize:vertical;border-radius:18px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--text);padding:16px;
+  font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace
+}
+input[type=file]{width:100%;color:var(--muted);font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.controls{display:grid;gap:12px}
+.field{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:12px 14px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.02)
+}
+.field span{color:var(--muted);font-size:13px}
+.field input[type=number]{
+  width:84px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);padding:8px 10px
+}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.check{
+  display:flex;gap:8px;align-items:center;padding:10px 12px;border:1px solid var(--line);
+  border-radius:14px;background:rgba(255,255,255,.02);color:var(--muted);font-size:13px
+}
+button{
+  border:0;border-radius:14px;padding:12px 16px;font-size:14px;font-weight:700;cursor:pointer;
+  transition:transform .15s ease,opacity .15s ease,background .15s ease
+}
 button:hover{transform:translateY(-1px)}
-button.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
-button:disabled{opacity:.45;cursor:not-allowed;transform:none}
-.progress{height:10px;background:var(--panel2);border-radius:99px;overflow:hidden;margin:14px 0 6px}
-.progress i{display:block;height:100%;width:0%;border-radius:99px;background:linear-gradient(90deg,var(--gold),var(--gold2));transition:width .8s}
-.stat{font-size:13px;color:var(--dim)}
-#scenes{max-height:420px;overflow:auto;margin-top:8px}
-.scene{display:grid;grid-template-columns:44px 1fr 1fr;gap:10px;padding:10px;border-bottom:1px solid var(--line);font-size:13px}
-.scene .no{color:var(--gold);font-weight:700}
-.scene .txt{color:var(--dim)}
-.scene input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:6px 9px;font-size:12px}
-.out{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
-.out a{color:var(--gold);text-decoration:none;font-weight:600}
-.badge{font-size:11px;padding:3px 10px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);color:var(--dim)}
-.badge.live{color:var(--ok);border-color:var(--ok)}
-.footer{margin-top:26px;color:var(--dim);font-size:12px;text-align:center}
-</style></head><body><div class="wrap">
-<header><div class="logo">🎬</div><div>
-<h1>Script → Video <span>Studio</span></h1>
-<div class="sub">voice-locked captions · vision-verified footage · retention sound design</div>
-</div><div style="margin-left:auto" id="state" class="badge">idle</div></header>
+button:disabled{opacity:.55;cursor:not-allowed;transform:none}
+.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#17130c}
+.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+.progress{height:11px;background:var(--panel2);border-radius:999px;overflow:hidden;margin:14px 0 8px}
+.progress i{display:block;height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--accent),#ffd78a);transition:width .6s ease}
+.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px}
+@media(max-width:760px){.summary{grid-template-columns:1fr}}
+.metric{
+  border:1px solid var(--line);border-radius:18px;padding:14px;background:rgba(255,255,255,.02)
+}
+.metric .label{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.metric .value{font-size:22px;font-weight:700}
+#warnings{display:grid;gap:8px;margin-bottom:14px}
+.warning{
+  border:1px solid rgba(255,138,91,.25);background:rgba(255,138,91,.08);color:#ffd7c8;
+  border-radius:14px;padding:10px 12px;font-size:12px
+}
+#scenes{display:grid;gap:14px;max-height:calc(100vh - 250px);overflow:auto;padding-right:4px}
+.scene{
+  border:1px solid var(--line);border-radius:22px;padding:16px;background:linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.01))
+}
+.scene-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}
+.scene-id{display:flex;gap:10px;align-items:center}
+.scene-no{
+  width:34px;height:34px;border-radius:12px;background:rgba(244,186,65,.12);border:1px solid rgba(244,186,65,.24);
+  display:flex;align-items:center;justify-content:center;color:var(--accent);font-weight:800
+}
+.scene-meta{display:flex;gap:8px;flex-wrap:wrap}
+.chip{
+  border:1px solid var(--line);border-radius:999px;padding:5px 10px;font-size:11px;color:var(--muted);background:rgba(255,255,255,.02)
+}
+.scene-text{color:#d7ddeb;margin-bottom:12px}
+.query-label{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.query-input{
+  width:100%;border-radius:14px;border:1px solid var(--line);background:var(--panel2);
+  color:var(--text);padding:12px 14px;font-size:13px;margin-bottom:12px
+}
+.cand-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.cand{
+  border:1px solid var(--line);border-radius:18px;overflow:hidden;background:rgba(255,255,255,.025)
+}
+.thumb{
+  aspect-ratio:16/9;background:#0c1018 center/cover no-repeat;border-bottom:1px solid var(--line)
+}
+.thumb.empty{
+  display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;
+  background:linear-gradient(135deg,#111826,#1a2231)
+}
+.cand-body{padding:10px}
+.cand-title{font-size:12px;color:var(--text);margin-bottom:6px;min-height:36px}
+.cand-meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:11px;margin-bottom:8px}
+.cand button{width:100%;padding:9px 10px;font-size:12px}
+.empty-plan{
+  border:1px dashed var(--line);border-radius:24px;padding:32px;color:var(--muted);text-align:center
+}
+.out{
+  display:flex;justify-content:space-between;align-items:center;gap:12px;
+  padding:12px 0;border-bottom:1px solid var(--line)
+}
+.out:last-child{border-bottom:0}
+.out a{color:var(--accent);text-decoration:none;font-weight:700}
+.footer{margin-top:18px;color:var(--muted);font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">AI</div>
+      <div>
+        <h1>AI Editing Tool</h1>
+        <div class="sub">Paste a script, break it into 3-second beats, preview matching visuals for the whole script, then render a local first cut.</div>
+        <div class="hero-stats">
+          <div class="pill">Local pipeline</div>
+          <div class="pill">Voice-aligned timing</div>
+          <div class="pill">Ranked stock matches</div>
+        </div>
+      </div>
+    </div>
+    <div id="state" class="badge">idle</div>
+  </header>
 
-<div class="grid">
-<div class="card"><h2>1 · Script & Voiceover</h2>
-<textarea id="script" placeholder="Paste your narration script here..."></textarea>
-<div class="row"><input type="file" id="voice" accept="audio/*">
-<button class="ghost" onclick="analyze()" id="btnA">Analyze scenes</button></div>
-<div class="stat" id="astat"></div></div>
+  <div class="shell">
+    <div class="stack">
+      <div class="card">
+        <h2>Script Input</h2>
+        <div class="lead">Drop in your narration, optionally attach voiceover, and generate a visual plan for the full script.</div>
+        <textarea id="script" placeholder="Paste your script here..."></textarea>
+        <div class="row" style="margin-top:14px">
+          <input type="file" id="voice" accept="audio/*">
+        </div>
+      </div>
 
-<div class="card"><h2>2 · Render settings</h2>
-<div class="row">
-<label class="opt">Scene sec <input type="number" id="sdur" value="6" min="3" max="12"></label>
-<label class="opt"><input type="checkbox" id="cards" checked> statement cards</label>
-<label class="opt"><input type="checkbox" id="sfx" checked> sound design</label>
-<label class="opt"><input type="checkbox" id="vision" checked> vision check</label>
-<label class="opt"><input type="checkbox" id="motion" checked> motion</label>
+      <div class="card">
+        <h2>Beat Settings</h2>
+        <div class="controls">
+          <label class="field">
+            <span>Target beat seconds</span>
+            <input type="number" id="sdur" value="3" min="2" max="12" step="0.5">
+          </label>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="cards" checked> statement cards</label>
+            <label class="check"><input type="checkbox" id="sfx" checked> sound design</label>
+            <label class="check"><input type="checkbox" id="vision" checked> vision ranking</label>
+            <label class="check"><input type="checkbox" id="motion" checked> camera motion</label>
+          </div>
+          <div class="row">
+            <button class="primary" onclick="analyze()" id="btnA">Generate matches</button>
+            <button class="ghost" onclick="render()" id="btnR">Render video</button>
+            <button class="ghost" onclick="stopRender()">Stop</button>
+          </div>
+          <div class="progress"><i id="bar"></i></div>
+          <div class="sub" id="astat">Ready for a script.</div>
+          <div class="sub" id="rstat">No render running.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Outputs</h2>
+        <div id="outs" class="sub">No exports yet.</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="card">
+        <h2>Beat Plan</h2>
+        <div class="summary">
+          <div class="metric"><div class="label">Beats</div><div class="value" id="beatCount">0</div></div>
+          <div class="metric"><div class="label">Timeline</div><div class="value" id="beatDuration">0.0s</div></div>
+          <div class="metric"><div class="label">Confident Matches</div><div class="value" id="beatConf">0</div></div>
+        </div>
+        <div id="warnings"></div>
+        <div id="scenes" class="empty-plan">Run Generate matches to preview the whole script beat-by-beat.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">Everything runs locally. Stock search uses Pexels and Pixabay. Alignment uses Whisper when voiceover is provided.</div>
 </div>
-<div class="row"><button onclick="render()" id="btnR">Render video</button>
-<button class="ghost" onclick="stopRender()">Stop</button></div>
-<div class="progress"><i id="bar"></i></div>
-<div class="stat" id="rstat">no render running</div></div>
-</div>
 
-<div class="card" style="margin-top:20px"><h2>3 · Scene plan (edit search phrases, then re-render)</h2>
-<div id="scenes" class="stat">Run Analyze to see the voice-aligned scene plan.</div></div>
-
-<div class="card" style="margin-top:20px"><h2>4 · Outputs</h2><div id="outs" class="stat">none yet</div></div>
-<div class="footer">Everything runs locally · Pexels + Pixabay stock · Whisper alignment · CLIP verification</div>
-</div>
 <script>
+function formatTime(value){
+  return (Number(value)||0).toFixed(1)+'s';
+}
+
+function escapeHtml(value){
+  return String(value)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function useCandidate(sceneNo, query){
+  const input=document.querySelector(`input[data-scene="${sceneNo}"]`);
+  if(input){input.value=query;input.focus();}
+}
+
+function renderWarnings(items){
+  const wrap=document.getElementById('warnings');
+  wrap.innerHTML='';
+  if(!items || !items.length){return;}
+  items.forEach(item=>{
+    const div=document.createElement('div');
+    div.className='warning';
+    div.textContent=item;
+    wrap.appendChild(div);
+  });
+}
+
+function renderPlan(scenes){
+  const el=document.getElementById('scenes');
+  const confident=scenes.filter(s=>typeof s.confidence==='number' && s.confidence >= 0.24).length;
+  document.getElementById('beatCount').textContent=String(scenes.length);
+  document.getElementById('beatDuration').textContent=scenes.length?formatTime(scenes[scenes.length-1].end):'0.0s';
+  document.getElementById('beatConf').textContent=String(confident);
+
+  if(!scenes.length){
+    el.className='empty-plan';
+    el.textContent='No beats generated.';
+    return;
+  }
+
+  el.className='';
+  el.innerHTML='';
+
+  scenes.forEach(scene=>{
+    const card=document.createElement('div');
+    card.className='scene';
+    const confidence=(typeof scene.confidence==='number') ? 'match '+scene.confidence.toFixed(2) : 'no score';
+    const query=(scene.keywords && scene.keywords[0]) ? scene.keywords[0] : '';
+    const candidates=(scene.candidates||[]).map(candidate=>{
+      const thumb=candidate.thumb
+        ? `<div class="thumb" style="background-image:url('${escapeHtml(candidate.thumb)}')"></div>`
+        : `<div class="thumb empty">No preview</div>`;
+      const score=(typeof candidate.sim==='number') ? candidate.sim.toFixed(2) : 'text';
+      const desc=escapeHtml(candidate.desc || candidate.query || 'Candidate visual');
+      const queryText=JSON.stringify(candidate.query || query);
+      return `
+        <div class="cand">
+          ${thumb}
+          <div class="cand-body">
+            <div class="cand-title">${desc.slice(0,82)}</div>
+            <div class="cand-meta">
+              <span>${escapeHtml(candidate.source || 'stock')}</span>
+              <span>${score}</span>
+            </div>
+            <button class="ghost" type="button" onclick='useCandidate(${scene.scene}, ${queryText})'>Use query</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    card.innerHTML = `
+      <div class="scene-top">
+        <div class="scene-id">
+          <div class="scene-no">${scene.scene}</div>
+          <div>
+            <div style="font-weight:700">Beat ${scene.scene}</div>
+            <div class="scene-meta">
+              <span class="chip">${formatTime(scene.start)} - ${formatTime(scene.end)}</span>
+              <span class="chip">${formatTime(scene.end - scene.start)}</span>
+              <span class="chip">${confidence}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="scene-text">${escapeHtml(scene.text || '')}</div>
+      <div class="query-label">Visual search phrase</div>
+      <input class="query-input" value="${escapeHtml(query)}" data-scene="${scene.scene}">
+      <div class="cand-grid">${candidates || '<div class="chip">No preview matches found for this beat yet.</div>'}</div>
+    `;
+    el.appendChild(card);
+  });
+}
+
 async function analyze(){
-  const s=document.getElementById('script').value.trim();
-  const f=document.getElementById('voice').files[0];
-  if(!s){alert('Paste your script first');return}
-  const fd=new FormData();fd.append('script',s);if(f)fd.append('voice',f);
+  const script=document.getElementById('script').value.trim();
+  const voice=document.getElementById('voice').files[0];
+  const duration=document.getElementById('sdur').value;
+  if(!script){alert('Paste your script first.');return;}
+  const fd=new FormData();
+  fd.append('script', script);
+  fd.append('scene_duration', duration);
+  if(voice){fd.append('voice', voice);}
   document.getElementById('btnA').disabled=true;
-  document.getElementById('astat').textContent=f?'Analyzing + aligning to voiceover (first time ~4 min for Whisper)...':'Analyzing...';
-  const r=await fetch('/api/analyze',{method:'POST',body:fd});const d=await r.json();
+  document.getElementById('astat').textContent=voice
+    ? 'Analyzing script, aligning voiceover, and finding preview visuals...'
+    : 'Analyzing script and finding preview visuals...';
+  renderWarnings([]);
+  const response=await fetch('/api/analyze', {method:'POST', body:fd});
+  const data=await response.json();
   document.getElementById('btnA').disabled=false;
-  if(d.error){document.getElementById('astat').textContent='Error: '+d.error;return}
-  document.getElementById('astat').textContent=d.scenes.length+' scenes · '+d.duration.toFixed(1)+'s';
-  renderPlan(d.scenes);
+  if(data.error){
+    document.getElementById('astat').textContent='Error: '+data.error;
+    return;
+  }
+  document.getElementById('astat').textContent =
+    data.scenes.length+' beats across '+data.duration.toFixed(1)+'s.';
+  renderWarnings(data.warnings || []);
+  renderPlan(data.scenes || []);
 }
-function renderPlan(sc){
-  const el=document.getElementById('scenes');el.innerHTML='';
-  sc.forEach(s=>{const div=document.createElement('div');div.className='scene';
-    div.innerHTML=`<div class="no">${s.scene}</div><div class="txt">${s.text}</div>
-    <div><input value="${(s.keywords[0]||'').replace(/"/g,'&quot;')}" data-scene="${s.scene}"></div>`;
-    el.appendChild(div);});
-}
+
 async function savePlan(){
-  const inputs=[...document.querySelectorAll('#scenes input')];
-  if(!inputs.length)return;
-  const edits={};inputs.forEach(i=>edits[i.dataset.scene]=i.value);
-  await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(edits)});
+  const inputs=[...document.querySelectorAll('.query-input')];
+  if(!inputs.length){return;}
+  const edits={};
+  inputs.forEach(input=>{edits[input.dataset.scene]=input.value;});
+  await fetch('/api/plan', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(edits)
+  });
 }
+
 async function render(){
   await savePlan();
-  const opts={scene_duration:+document.getElementById('sdur').value,
-    cards:document.getElementById('cards').checked,sfx:document.getElementById('sfx').checked,
-    vision:document.getElementById('vision').checked,motion:document.getElementById('motion').checked};
-  const r=await fetch('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(opts)});
-  const d=await r.json();if(d.error)alert(d.error);
+  const opts={
+    scene_duration:+document.getElementById('sdur').value,
+    cards:document.getElementById('cards').checked,
+    sfx:document.getElementById('sfx').checked,
+    vision:document.getElementById('vision').checked,
+    motion:document.getElementById('motion').checked
+  };
+  const response=await fetch('/api/render', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(opts)
+  });
+  const data=await response.json();
+  if(data.error){alert(data.error);}
 }
-async function stopRender(){await fetch('/api/stop',{method:'POST'})}
+
+async function stopRender(){
+  await fetch('/api/stop', {method:'POST'});
+}
+
 async function poll(){
-  const r=await fetch('/api/progress');const d=await r.json();
-  document.getElementById('state').textContent=d.state;
-  document.getElementById('state').className='badge'+(d.state==='rendering'?' live':'');
-  if(d.total){document.getElementById('bar').style.width=(100*d.done/d.total)+'%';
-    document.getElementById('rstat').textContent=`scene ${d.done}/${d.total}`+(d.state==='done'?' · finished!':'');}
-  const o=await fetch('/api/outputs');const outs=await o.json();
-  const el=document.getElementById('outs');
-  el.innerHTML=outs.length?'':'none yet';
-  outs.forEach(f=>{const div=document.createElement('div');div.className='out';
-    div.innerHTML=`<span>${f.name} · ${f.mb} MB</span><a href="/outputs/${f.name}" download>download</a>`;
-    el.appendChild(div);});
+  const progressResp=await fetch('/api/progress');
+  const progress=await progressResp.json();
+  const badge=document.getElementById('state');
+  badge.textContent=progress.state;
+  badge.className='badge'+(progress.state==='rendering' ? ' live' : '');
+
+  if(progress.total){
+    document.getElementById('bar').style.width=(100*progress.done/progress.total)+'%';
+    document.getElementById('rstat').textContent='Rendered '+progress.done+' of '+progress.total+' beats.';
+  }else{
+    document.getElementById('bar').style.width='0%';
+    document.getElementById('rstat').textContent='No render running.';
+  }
+  if(progress.state==='done'){
+    document.getElementById('rstat').textContent='Render finished.';
+  }else if(progress.state==='error'){
+    document.getElementById('rstat').textContent='Render failed. Check output/render.log for details.';
+  }
+
+  const outputsResp=await fetch('/api/outputs');
+  const outputs=await outputsResp.json();
+  const outWrap=document.getElementById('outs');
+  outWrap.innerHTML=outputs.length ? '' : 'No exports yet.';
+  outputs.forEach(file=>{
+    const div=document.createElement('div');
+    div.className='out';
+    div.innerHTML=`<span>${escapeHtml(file.name)} - ${file.mb} MB</span><a href="/outputs/${encodeURIComponent(file.name)}" download>Download</a>`;
+    outWrap.appendChild(div);
+  });
 }
-setInterval(poll,2500);poll();
-</script></body></html>"""
+
+setInterval(poll, 2500);
+poll();
+</script>
+</body>
+</html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -167,32 +462,71 @@ def index():
 
 
 @app.post("/api/analyze")
-async def analyze(script: str = Form(...), voice: UploadFile = File(None)):
+async def analyze(script: str = Form(...),
+                  scene_duration: float = Form(DEFAULT_BEAT_SECONDS),
+                  voice: UploadFile = File(None)):
     UPLOADS.mkdir(exist_ok=True)
-    SCRIPT.write_text(script)
+    SCRIPT.write_text(script, encoding="utf-8")
     voice_arg = []
     if voice is not None:
         VOICE.write_bytes(await voice.read())
         VOICE.with_suffix(".words.json").unlink(missing_ok=True)
         voice_arg = ["--voiceover", str(VOICE)]
+    else:
+        VOICE.unlink(missing_ok=True)
+        VOICE.with_suffix(".words.json").unlink(missing_ok=True)
+    PLAN.unlink(missing_ok=True)
     cmd = [sys.executable, "main.py", str(SCRIPT), *voice_arg,
-           "--scene-duration", "6", "--export-plan", str(PLAN)]
+           "--scene-duration", str(scene_duration), "--export-plan", str(PLAN)]
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if not PLAN.exists():
         return JSONResponse({"error": proc.stdout[-400:] + proc.stderr[-400:]})
-    plan = json.loads(PLAN.read_text())
-    return {"scenes": plan, "duration": plan[-1]["end"] if plan else 0.0}
+    plan = json.loads(PLAN.read_text(encoding="utf-8"))
+
+    warnings: list[str] = []
+    preview_used_ids: set[str] = set()
+    enriched = []
+    for index, entry in enumerate(plan):
+        scene = Scene(entry["text"], entry["start"], entry["end"], list(entry["keywords"]))
+        try:
+            candidates = find_candidates_for_scene(scene, index, preview_used_ids, limit=3)
+        except ClipSearchError as exc:
+            candidates = []
+            warnings.append(str(exc).splitlines()[0])
+        if candidates:
+            preview_used_ids.add(candidates[0].key)
+        enriched.append({
+            **entry,
+            "confidence": round(candidates[0].sim, 3) if candidates and candidates[0].sim >= 0 else None,
+            "candidates": [
+                {
+                    "source": c.source,
+                    "video_id": c.video_id,
+                    "query": c.query,
+                    "desc": c.desc,
+                    "sim": round(c.sim, 3) if c.sim >= 0 else None,
+                    "thumb": c.thumb,
+                }
+                for c in candidates
+            ],
+        })
+
+    return {
+        "scenes": enriched,
+        "duration": enriched[-1]["end"] if enriched else 0.0,
+        "warnings": warnings[:6],
+    }
 
 
 @app.post("/api/plan")
 async def save_plan(edits: dict):
     if PLAN.exists():
-        plan = json.loads(PLAN.read_text())
+        plan = json.loads(PLAN.read_text(encoding="utf-8"))
         for s in plan:
             key = str(s["scene"])
             if key in edits and edits[key].strip():
                 s["keywords"] = [edits[key].strip()] + list(s["keywords"][1:])
-        PLAN.write_text(json.dumps(plan, indent=2))
+        PLAN.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return {"ok": True}
 
 
@@ -203,7 +537,7 @@ async def render(opts: dict):
         return JSONResponse({"error": "A render is already running"})
     if not SCRIPT.exists():
         return JSONResponse({"error": "Run Analyze first"})
-    _expected_scenes = len(json.loads(PLAN.read_text())) if PLAN.exists() else 0
+    _expected_scenes = len(json.loads(PLAN.read_text(encoding="utf-8"))) if PLAN.exists() else 0
     cmd = [sys.executable, "main.py", str(SCRIPT),
            "--scene-duration", str(opts.get("scene_duration", 6))]
     if VOICE.exists():

@@ -12,14 +12,23 @@ from nltk.corpus import stopwords
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.tag import pos_tag
 
-# Download required NLTK data if not present
-for resource in ['punkt_tab', 'punkt', 'averaged_perceptron_tagger', 'stopwords']:
+# Download required NLTK data if not present. Resource families live under
+# different roots, so each package needs the correct lookup path.
+NLTK_RESOURCES = [
+    ("tokenizers/punkt_tab", "punkt_tab"),
+    ("tokenizers/punkt", "punkt"),
+    ("taggers/averaged_perceptron_tagger_eng", "averaged_perceptron_tagger_eng"),
+    ("taggers/averaged_perceptron_tagger", "averaged_perceptron_tagger"),
+    ("corpora/stopwords", "stopwords"),
+]
+
+for lookup_path, package_name in NLTK_RESOURCES:
     try:
-        nltk.data.find(resource if '/' in resource else f'tokenizers/{resource}')
+        nltk.data.find(lookup_path)
     except LookupError:
         try:
-            nltk.download(resource, quiet=True)
-        except:
+            nltk.download(package_name, quiet=True)
+        except Exception:
             pass
 
 

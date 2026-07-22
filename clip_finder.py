@@ -395,6 +395,107 @@ def find_clip_for_scene(scene: Scene, index: int, used_ids: set[str],
     return None
 
 
+def find_candidates_for_scene(scene: Scene, index: int, used_ids: set[str] | None = None,
+                              use_vision: bool = True, limit: int = 3) -> list[ClipCandidate]:
+    """
+    Return a ranked list of preview candidates for a scene without downloading
+    media. This is used by the web UI to show likely matches before render.
+    """
+    if any(" " in kw for kw in scene.keywords):
+        queries = list(dict.fromkeys(kw for kw in scene.keywords if kw))
+    else:
+        queries = list(dict.fromkeys(q for q in [
+            " ".join(scene.keywords),
+            " ".join(scene.keywords[:2]),
+            scene.keywords[0] if scene.keywords else "",
+        ] if q))
+    if not queries or limit <= 0:
+        return []
+
+    providers = ("pexels", "pixabay") if index % 2 == 0 else ("pixabay", "pexels")
+    used = used_ids or set()
+    vision_on = use_vision
+    if vision_on:
+        import vision
+        vision_on = vision.available()
+
+    scored: dict[str, tuple[float, float, ClipCandidate]] = {}
+    errors: list[str] = []
+    attempts = 0
+    weak_fallback: tuple[float, ClipCandidate] | None = None
+    used_fallback: tuple[float, ClipCandidate] | None = None
+
+    for query in queries:
+        for provider in providers:
+            attempts += 1
+            try:
+                results = _search(provider, query)
+            except requests.RequestException as exc:
+                errors.append(f"{provider}('{query}'): {exc}")
+                continue
+
+            floor = _relevance_floor(query)
+            passing = []
+            for r in results:
+                rel = _relevance(query, r.get("desc", ""))
+                text_score = (_score(r["width"], r["height"], r["duration"], scene.duration)
+                              + rel)
+                thumbs = tuple(r.get("thumbs") or ([r["thumb"]] if r.get("thumb") else []))
+                candidate = ClipCandidate(
+                    source=r["source"], video_id=r["id"], download_url=r["url"],
+                    width=r["width"], height=r["height"], duration=r["duration"],
+                    query=query, desc=r.get("desc", ""),
+                    thumb=thumbs[0] if thumbs else "",
+                )
+                if candidate.key in used:
+                    if used_fallback is None or text_score > used_fallback[0]:
+                        used_fallback = (text_score, candidate)
+                    continue
+                if rel < floor:
+                    if weak_fallback is None or text_score > weak_fallback[0]:
+                        weak_fallback = (text_score, candidate)
+                    continue
+                passing.append((text_score, candidate, thumbs))
+
+            if not passing:
+                continue
+            passing.sort(key=lambda t: t[0], reverse=True)
+            top = passing[:VISION_TOP_K]
+
+            if vision_on:
+                import vision
+                sims = vision.score_candidates(query, [t[2] for t in top])
+                for (text_score, cand, _), sim in zip(top, sims):
+                    if sim is None:
+                        continue
+                    cand.sim = sim
+                    prev = scored.get(cand.key)
+                    score = (sim, text_score, cand)
+                    if prev is None or score[:2] > prev[:2]:
+                        scored[cand.key] = score
+            else:
+                for text_score, cand, _ in top[:limit]:
+                    prev = scored.get(cand.key)
+                    score = (text_score, text_score, cand)
+                    if prev is None or score[:2] > prev[:2]:
+                        scored[cand.key] = score
+
+    if not scored:
+        if weak_fallback is not None:
+            return [weak_fallback[1]]
+        if used_fallback is not None:
+            return [used_fallback[1]]
+        if errors and len(errors) == attempts:
+            raise ClipSearchError(
+                f"All {attempts} search attempts failed for keywords {scene.keywords}:\n  - "
+                + "\n  - ".join(errors)
+            )
+        return []
+
+    ranked = sorted(scored.values(), key=lambda item: item[:2], reverse=True)
+    return [cand for _a, _b, cand in ranked[:limit]]
+
+
 # ---------------------------------------------------------------------------
 # Step 4: download & trim (raw file deleted by the caller after render)
 # ---------------------------------------------------------------------------
